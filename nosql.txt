@@ -1,0 +1,255 @@
+// NoSQL database scripts: MongoDB (Document), Neo4j (Graph), Redis (Key–Value Sessions)
+
+// ######################
+// MongoDB (Document DB)
+// ######################
+
+db.createCollection("lines", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "code", "name", "mode", "itinerary"],
+      properties: {
+        _id: { bsonType: "string" },
+        code: { bsonType: "string" },
+        name: { bsonType: "string" },
+        mode: { enum: ["bus", "tram", "metro"] },
+        itinerary: {
+          bsonType: "array",
+          items: {
+            bsonType: "object",
+            required: ["stop_id", "seq", "avgStopSec"],
+            properties: {
+              stop_id: { bsonType: "string" },
+              seq: { bsonType: "int" },
+              avgStopSec: { bsonType: "int" }
+            }
+          }
+        },
+        alerts: {
+          bsonType: "array",
+          items: {
+            bsonType: "object",
+            required: ["msg", "from"],
+            properties: {
+              msg: { bsonType: "string" },
+              from: { bsonType: "date" },
+              to: { bsonType: ["date", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+});
+
+db.createCollection("stops", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "code", "name", "location"],
+      properties: {
+        _id: { bsonType: "string" },
+        code: { bsonType: "string" },
+        name: { bsonType: "string" },
+        location: {
+          bsonType: "object",
+          required: ["type", "coordinates"],
+          properties: {
+            type: { enum: ["Point"] },
+            coordinates: {
+              bsonType: "array",
+              items: { bsonType: "double" },
+              minItems: 2,
+              maxItems: 2
+            }
+          }
+        },
+        amenities: {
+          bsonType: "array",
+          items: { bsonType: "string" }
+        }
+      }
+    }
+  }
+});
+
+db.createCollection("vehicles", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "plate", "capacity", "line"],
+      properties: {
+        _id: { bsonType: "string" },
+        plate: { bsonType: "string" },
+        model: { bsonType: "string" },
+        capacity: { bsonType: "int" },
+        features: {
+          bsonType: "object",
+          properties: {
+            lowFloor: { bsonType: "bool" },
+            aircon: { bsonType: "bool" }
+          }
+        },
+        line: { bsonType: "string" },
+        lastKnown: {
+          bsonType: "object",
+          required: ["ts", "loc"],
+          properties: {
+            ts: { bsonType: "date" },
+            loc: {
+              bsonType: "object",
+              required: ["type", "coordinates"],
+              properties: {
+                type: { enum: ["Point"] },
+                coordinates: {
+                  bsonType: "array",
+                  items: { bsonType: "double" },
+                  minItems: 2,
+                  maxItems: 2
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+});
+
+db.createCollection("user_profiles", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "favorites", "prefs"],
+      properties: {
+        _id: { bsonType: "string" },
+        favorites: {
+          bsonType: "object",
+          required: ["lines", "stops"],
+          properties: {
+            lines: { bsonType: "array", items: { bsonType: "string" } },
+            stops: { bsonType: "array", items: { bsonType: "string" } }
+          }
+        },
+        prefs: {
+          bsonType: "object",
+          properties: {
+            notifyDisruptions: { bsonType: "bool" },
+            units: { enum: ["metric", "imperial"] }
+          }
+        },
+        recentTrips: {
+          bsonType: "array",
+          items: {
+            bsonType: "object",
+            required: ["trip_id", "at", "origin", "dest"],
+            properties: {
+              trip_id: { bsonType: "string" },
+              at: { bsonType: "date" },
+              origin: { bsonType: "string" },
+              dest: { bsonType: "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+});
+
+db.createCollection("trips", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "user_id", "line_id", "planned_start"],
+      properties: {
+        _id: { bsonType: "string" },
+        user_id: { bsonType: "string" },
+        line_id: { bsonType: "string" },
+        planned_start: { bsonType: "date" },
+        planned_end: { bsonType: ["date", "null"] },
+        origin_stop: { bsonType: "string" },
+        dest_stop: { bsonType: "string" },
+        created_at: { bsonType: "date" }
+      }
+    }
+  }
+});
+
+db.createCollection("trip_stops", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["trip_id", "stop_id", "seq"],
+      properties: {
+        trip_id: { bsonType: "string" },
+        stop_id: { bsonType: "string" },
+        seq: { bsonType: "int" },
+        eta: { bsonType: "date" },
+        ata: { bsonType: ["date", "null"] }
+      }
+    }
+  }
+});
+
+db.createCollection("line_schedules", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "line_id", "dow", "start_time", "end_time", "headway_minutes"],
+      properties: {
+        _id: { bsonType: "string" },
+        line_id: { bsonType: "string" },
+        dow: { bsonType: "int", minimum: 0, maximum: 6 },
+        start_time: { bsonType: "string" },
+        end_time: { bsonType: "string" },
+        headway_minutes: { bsonType: "int", minimum: 1 }
+      }
+    }
+  }
+});
+
+// #################
+// Neo4j (Graph DB)
+// #################
+
+Schema Constraints
+CREATE CONSTRAINT stop_id_unique IF NOT EXISTS FOR (s:Stop) REQUIRE s.stop_id IS UNIQUE;
+CREATE CONSTRAINT line_id_unique IF NOT EXISTS FOR (l:Line) REQUIRE l.line_id IS UNIQUE;
+CREATE INDEX stop_code IF NOT EXISTS FOR (s:Stop) ON (s.code);
+
+// Sample Nodes
+CREATE (:Stop { stop_id: 'STOP001', code: 'ST01', name: 'Example Station', location: point({ longitude: -3.14, latitude: 42.42 }) });
+CREATE (:Stop { stop_id: 'STOP002', code: 'ST02', name: 'Example2 Station', location: point({ longitude: -3.14, latitude: 42.42 }) });
+CREATE (:Stop { stop_id: 'STOP003', code: 'ST03', name: 'Example3 Station', location: point({ longitude: -3.14, latitude: 42.42 }) });
+
+CREATE (:Line { line_id: 'LINE001', code: 'L1', name: 'Colored Line' });
+CREATE (:Line { line_id: 'LINE002', code: 'L2', name: 'Colored2 Line' });
+
+// Relationships: Connectivity
+MATCH (a:Stop { stop_id: 'STOP001' }), (b:Stop { stop_id: 'STOP002' })
+CREATE (a)-[:NEXT { line_id: 'LINE001', seq: 1, avg_travel_s: 120 }]->(b);
+
+MATCH (b:Stop { stop_id: 'STOP002' }), (c:Stop { stop_id: 'STOP003' })
+CREATE (b)-[:NEXT { line_id: 'LINE001', seq: 2, avg_travel_s: 180 }]->(c);
+
+// Transfer path between lines
+MATCH (a:Stop { stop_id: 'STOP001' }), (c:Stop { stop_id: 'STOP003' })
+CREATE (a)-[:TRANSFER { walk_s: 300 }]->(c);
+
+// Stop-Line service mapping
+MATCH (s:Stop { stop_id: 'STOP001' }), (l:Line { line_id: 'LINE001' })
+CREATE (s)-[:SERVES]->(l);
+
+MATCH (s:Stop { stop_id: 'STOP002' }), (l:Line { line_id: 'LINE001' })
+CREATE (s)-[:SERVES]->(l);
+
+MATCH (s:Stop { stop_id: 'STOP003' }), (l:Line { line_id: 'LINE002' })
+CREATE (s)-[:SERVES]->(l);
+
+// ######################
+// Redis (Key–Value DB)
+// ######################
+
+// Format: access_token:<session_id> → user_id
+SET access_token:abdc1234 user_1234 EX 3600
