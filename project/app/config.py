@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     SESSION_TTL_SECONDS: int = 3600 # 1 hour session TTL
     
-class Config:
+    class Config:
         env_file = ".env"
 
 settings = Settings()

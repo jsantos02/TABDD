@@ -1,11 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Login{% endblock %}
+{% block title %}Register{% endblock %}
 {% block content %}
-<h1>Login</h1>
+<h1>Register</h1>
+
 {% if error %}
   <p class="error">{{ error }}</p>
 {% endif %}
-<form method="post" action="/login">
+
+<form method="post" action="/register">
+  <div>
+    <label>Full name</label><br />
+    <input type="text" name="full_name" required />
+  </div>
   <div>
     <label>Email</label><br />
     <input type="email" name="email" required />
@@ -14,11 +20,11 @@
     <label>Password</label><br />
     <input type="password" name="password" required />
   </div>
-  <button type="submit">Login</button>
+  <button type="submit">Create account</button>
 </form>
 
 <p>
-  Don't have an account?
-  <a href="/register">Register here</a>.
+  Already have an account?
+  <a href="/login">Back to login</a>
 </p>
 {% endblock %}
