@@ -15,7 +15,12 @@ import uuid
 from app.db.oracle import get_engine
 from app.db.redis import redis_client
 from app.config import settings
-from app.repositories import oracle_users
+from app.repositories import oracle_users, oracle_sessions
+from datetime import datetime, timedelta
+from app.db.mongo import mongo_db
+from app.db.neo4j import neo4j_driver
+
+
 
 
 app = FastAPI(title="Urban Transport App")
@@ -46,20 +51,67 @@ class LoginRequest(BaseModel):
 SESSION_PREFIX = "session:"
 
 
-def create_session(user_id: str) -> str:
+def create_session(user_id: str, request: Request) -> str:
+    """
+    Create a session:
+    - Insert row into Oracle user_sessions (for history / auditing)
+    - Store token->user_id in Redis for fast runtime auth
+    """
     token = str(uuid.uuid4())
+    now = datetime.utcnow()
+    expires_at = now + timedelta(seconds=settings.SESSION_TTL_SECONDS)
+
+    user_agent = request.headers.get("user-agent")
+    ip = request.client.host if request.client else None
+
+    # 1) Persist in Oracle
+    oracle_sessions.create_user_session(
+        session_id=token,
+        user_id=user_id,
+        issued_at=now,
+        expires_at=expires_at,
+        user_agent=user_agent,
+        ip=ip,
+    )
+
+    # 2) Store active session in Redis (fast lookup)
     redis_client.setex(
         SESSION_PREFIX + token,
         settings.SESSION_TTL_SECONDS,
         user_id,
     )
+
     return token
+
+
 
 
 def get_user_id_from_token(token: str | None) -> str | None:
     if not token:
         return None
-    return redis_client.get(SESSION_PREFIX + token)
+
+    # 1) Fast path: Redis
+    user_id = redis_client.get(SESSION_PREFIX + token)
+    if user_id:
+        return user_id
+
+    # 2) Fallback: Oracle user_sessions (in case Redis lost the key)
+    session = oracle_sessions.get_active_session(token)
+    if not session:
+        return None  # no such session or already expired in Oracle
+
+    user_id = session["user_id"]
+
+    # 3) Re-hydrate Redis with remaining TTL (optional but nice)
+    expires_at = session["expires_at"]
+    # expires_at is a datetime from Oracle; use UTC-ish delta
+    now = datetime.now(datetime.timezone.utc)
+    ttl_seconds = int((expires_at - now).total_seconds())
+
+    if ttl_seconds > 0:
+        redis_client.setex(SESSION_PREFIX + token, ttl_seconds, user_id)
+
+    return user_id
 
 
 async def get_current_user(request: Request):
@@ -140,7 +192,7 @@ async def login_submit(
             status_code=400,
         )
 
-    token = create_session(user["user_id"])
+    token = create_session(user["user_id"], request)
 
     response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
@@ -188,7 +240,8 @@ async def register_submit(
     )
 
     # auto-login: create session and redirect to home
-    token = create_session(user_id)
+    token = create_session(user_id, request)
+
     response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
         key="session_token",
@@ -219,12 +272,12 @@ def api_register(data: RegisterRequest):
 
 
 @app.post("/api/auth/login")
-def api_login(data: LoginRequest):
+def api_login(request: Request, data: LoginRequest):
     user = oracle_users.get_user_by_email(data.email)
     if not user or not oracle_users.verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Invalid credentials")
 
-    token = create_session(user["user_id"])
+    token = create_session(user["user_id"], request)
 
     response = JSONResponse({"access_token": token, "token_type": "bearer"})
     response.set_cookie(
@@ -236,22 +289,25 @@ def api_login(data: LoginRequest):
     return response
 
 
-from fastapi.responses import RedirectResponse
-
-# ... keep the rest of your imports / code ...
-
-
 @app.get("/logout")
 async def logout(request: Request):
-    # remove session from Redis
     token = request.cookies.get("session_token")
+
     if token:
+        # 1) remove from Redis
         redis_client.delete(SESSION_PREFIX + token)
 
-    # remove cookie and redirect to login
+        # 2) remove from Oracle (hard delete)
+        deleted = oracle_sessions.delete_user_session(token)
+        # if you want to debug, you can temporarily print:
+        # print(f"Deleted {deleted} session rows for {token}")
+
+        # (If you prefer soft delete, use expire_user_session(token) instead.)
+
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie("session_token")
     return response
+
 
 
 @app.get("/me")
@@ -294,5 +350,28 @@ def redis_test():
         redis_client.set("test-key", "hello-redis")
         value = redis_client.get("test-key")
         return {"ok": True, "ping": ping, "test_value": value}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.get("/mongo-test")
+def mongo_test():
+    try:
+        # simple ping via a trivial write/read
+        test_coll = mongo_db["__healthcheck"]
+        test_coll.insert_one({"_id": "ping", "value": "ok"})
+        doc = test_coll.find_one({"_id": "ping"})
+        return {"ok": True, "doc": {"_id": str(doc["_id"]), "value": doc["value"]}}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.get("/neo4j-test")
+def neo4j_test():
+    try:
+        with neo4j_driver.session() as session:
+            # Simple query: count all nodes
+            result = session.run("MATCH (n) RETURN count(n) AS cnt")
+            record = result.single()
+            count = record["cnt"] if record else 0
+        return {"ok": True, "node_count": count}
     except Exception as e:
         return {"ok": False, "error": str(e)}

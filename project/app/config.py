@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     
     REDIS_URL: str = "redis://localhost:6379/0"
     SESSION_TTL_SECONDS: int = 3600 # 1 hour session TTL
+
+    # matches docker: mongo-local on port 27017
+    MONGO_URI: str = "mongodb://localhost:27017"
+    MONGO_DB: str = "urban_transport"
+
+    # matches docker: neo4j-local
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = "password"
     
     class Config:
         env_file = ".env"
