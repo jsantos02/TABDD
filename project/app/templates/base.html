@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>{% block title %}Urban Transport{% endblock %}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 0; }
+    header { background: #1f2933; color: #fff; padding: 12px 24px; }
+    header a { color: #fff; margin-right: 16px; text-decoration: none; }
+    main { padding: 16px 24px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f3f4f6; text-align: left; }
+    .error { color: #b91c1c; }
+    input, button { padding: 6px 10px; margin: 4px 0; }
+  </style>
+</head>
+<body>
+<header>
+  <a href="/">Home</a>
+  <a href="/lines">Lines</a>
+  <a href="/history">History</a>
+  <a href="/profile">Profile</a>
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block content %}
+<h1>Travel history</h1>
+<table>
+  <thead>
+  <tr>
+    <th>Line</th>
+    <th>Origin</th>
+    <th>Destination</th>
+    <th>Planned start</th>
+    <th>Planned end</th>
+  </tr>
+  </thead>
+  <tbody>
+  {% for t in trips %}
+    <tr>
+      <td>{{ t.line_code }} – {{ t.line_name }}</td>
+      <td>{{ t.origin_name }}</td>
+      <td>{{ t.dest_name }}</td>
+      <td>{{ t.planned_start }}</td>
+      <td>{{ t.planned_end }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

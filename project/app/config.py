@@ -17,6 +17,9 @@ class Settings(BaseSettings):
             f"/?service_name={self.ORACLE_SERVICE}"
         )
     
+    REDIS_URL: str = "redis://localhost:6379/0"
+    SESSION_TTL_SECONDS: int = 3600
+    
 class Config:
         env_file = ".env"
 

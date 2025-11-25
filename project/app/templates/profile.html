@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Profile{% endblock %}
+{% block content %}
+<h1>Profile</h1>
+
+<p><strong>User:</strong> {{ user.full_name }} ({{ user.email }})</p>
+
+<h2>Favorites</h2>
+<form method="post" action="/profile/favorites">
+  <div>
+    <label>Favorite line IDs (comma separated)</label><br />
+    <input type="text" name="lines"
+           value="{{ profile.favorites.lines | join(',') }}" />
+  </div>
+  <div>
+    <label>Favorite stop IDs (comma separated)</label><br />
+    <input type="text" name="stops"
+           value="{{ profile.favorites.stops | join(',') }}" />
+  </div>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Recent trips (from Mongo profile)</h2>
+<ul>
+  {% for t in profile.recentTrips %}
+    <li>{{ t.at }}: {{ t.origin }} → {{ t.dest }} (trip {{ t.trip_id }})</li>
+  {% endfor %}
+</ul>
+{% endblock %}
