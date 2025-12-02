@@ -11,21 +11,19 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 import uuid
-
+from typing import Optional, List, Dict
 from app.db.oracle import get_engine
 from app.db.redis import redis_client
 from app.config import settings
 from app.repositories import oracle_users, oracle_sessions
-from datetime import datetime, timedelta
-from app.db.mongo import mongo_db
-from app.db.neo4j import neo4j_driver
+from datetime import datetime, timedelta, timezone
+from app.db.mongo import mongo_db, mongo_client
+from app.db.neo4j import get_driver
+from app.services.travel_history import create_trip_polyglot
 
 
 
-
-app = FastAPI(title="Urban Transport App")
-
-# Jinja2 templates (make sure your HTML files are in app/templates/)
+app = FastAPI(title="Porto Transport App")
 templates = Jinja2Templates(directory="app/templates")
 
 
@@ -42,6 +40,19 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+class TripSegment(BaseModel):
+    stop_id: str
+    eta: Optional[datetime] = None
+    ata: Optional[datetime] = None
+
+
+class TripCreate(BaseModel):
+    origin_stop_id: str
+    dest_stop_id: str
+    line_id: Optional[str] = None
+    planned_start: datetime
+    planned_end: Optional[datetime] = None
 
 
 # ---------------------------
@@ -251,7 +262,6 @@ async def register_submit(
     )
     return response
 
-
 # ---------------------------
 # JSON auth API (for Postman, etc.)
 # ---------------------------
@@ -324,6 +334,397 @@ def me(current_user=Depends(get_current_user)):
     }
 
 
+@app.get("/api/lines/{line_id}")
+def line_detail(line_id: str, current_user=Depends(get_current_user)):
+    """
+    Return Mongo-only line document.
+
+    Example doc:
+    {
+      "_id": "LINE_M_A",
+      "code": "A",
+      "name": "...",
+      "mode": "metro",
+      "itinerary": [...],
+      "alerts": [...]
+    }
+    """
+    doc = mongo_db.lines.find_one({"_id": line_id})
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Line not found in MongoDB")
+
+    # Optional: convert _id to plain string (it already is, but this is safe)
+    doc["_id"] = str(doc["_id"])
+
+    return doc
+
+
+@app.get("/api/oracle/lines/{line_id}") # oracle only
+def oracle_line_detail(line_id: str, current_user=Depends(get_current_user)):
+    """
+    Oracle-only view of a line:
+    - line row from Oracle 'lines' table
+    - ordered itinerary from 'stop_times' + 'stops'
+    """
+    with get_engine().begin() as conn:
+        # 1) Fetch the line from Oracle
+        line_row = conn.execute(
+            text(
+                """
+                SELECT
+                    line_id,
+                    code,
+                    name,
+                    line_mode,
+                    active
+                FROM lines
+                WHERE line_id = :line_id
+                """
+            ),
+            {"line_id": line_id},
+        ).mappings().first()
+
+        if not line_row:
+            raise HTTPException(status_code=404, detail="Line not found in Oracle")
+
+        # 2) Fetch ordered stops for this line
+        stops_rows = conn.execute(
+            text(
+                """
+                SELECT
+                    s.stop_id,
+                    s.code       AS stop_code,
+                    s.name       AS stop_name,
+                    s.lat,
+                    s.lon,
+                    st.scheduled_seconds_from_start AS seconds_from_start
+                FROM stop_times st
+                JOIN stops s ON s.stop_id = st.stop_id
+                WHERE st.line_id = :line_id
+                ORDER BY st.scheduled_seconds_from_start
+                """
+            ),
+            {"line_id": line_id},
+        ).mappings().all()
+
+    return {
+        "line": dict(line_row),
+        "stops": [dict(r) for r in stops_rows],
+    }
+
+@app.post("/api/trips")
+def create_trip(
+    trip: TripCreate,
+    current_user=Depends(get_current_user),
+):
+    """
+    Create a trip for the logged-in user.
+
+    - Writes main record into Oracle `trips`
+    - Mirrors summary into MongoDB:
+        - `trips` collection
+        - `user_profiles.recentTrips` (rolling list)
+    """
+    user_id = current_user["user_id"]
+    now = datetime.now(timezone.utc)
+    trip_id = str(uuid.uuid4())
+
+    # --------------------------
+    # 1) Oracle: main history
+    # --------------------------
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO trips (
+                    trip_id,
+                    user_id,
+                    line_id,
+                    origin_stop_id,
+                    dest_stop_id,
+                    planned_start,
+                    planned_end,
+                    created_at
+                ) VALUES (
+                    :trip_id,
+                    :user_id,
+                    :line_id,
+                    :origin_stop_id,
+                    :dest_stop_id,
+                    :planned_start,
+                    :planned_end,
+                    :created_at
+                )
+                """
+            ),
+            {
+                "trip_id": trip_id,
+                "user_id": user_id,
+                "line_id": trip.line_id,
+                "origin_stop_id": trip.origin_stop_id,
+                "dest_stop_id": trip.dest_stop_id,
+                "planned_start": trip.planned_start,
+                "planned_end": trip.planned_end,
+                "created_at": now,
+            },
+        )
+
+    # --------------------------
+    # 2) MongoDB: mirror trips
+    # --------------------------
+    trips_col = mongo_db["trips"]
+    trips_col.insert_one(
+        {
+            "_id": trip_id,
+            "user_id": user_id,
+            "line_id": trip.line_id,
+            "origin_stop": trip.origin_stop_id,
+            "dest_stop": trip.dest_stop_id,
+            "planned_start": trip.planned_start,
+            "planned_end": trip.planned_end,
+            "created_at": now,
+        }
+    )
+
+    # --------------------------
+    # 3) MongoDB: user_profiles.recentTrips
+    #    (rolling list, e.g. last 10)
+    # --------------------------
+    profiles = mongo_db["user_profiles"]
+    profiles.update_one(
+        {"_id": user_id},
+        {
+            # if user_profile does not exist, create base structure
+            "$setOnInsert": {
+                "favorites": {"lines": [], "stops": []},
+                "prefs": {"notifyDisruptions": False, "units": "metric"},
+            },
+            # push latest trip, keep only last 10
+            "$push": {
+                "recentTrips": {
+                    "$each": [
+                        {
+                            "trip_id": trip_id,
+                            "at": now,
+                            "origin": trip.origin_stop_id,
+                            "dest": trip.dest_stop_id,
+                        }
+                    ],
+                    "$slice": -10,
+                }
+            },
+        },
+        upsert=True,
+    )
+
+    return {
+        "ok": True,
+        "trip_id": trip_id,
+        "user_id": user_id,
+    }
+
+
+@app.get("/api/route")
+def get_route(
+    origin_stop_id: str,
+    dest_stop_id: str,
+    current_user=Depends(get_current_user),
+):
+    driver = get_driver()
+
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (origin:Stop { stop_id: $origin_id }),
+                  (dest:Stop   { stop_id: $dest_id })
+            MATCH p = shortestPath(
+                (origin)-[:NEXT|TRANSFER*..50]->(dest)
+            )
+            RETURN p AS path
+            """,
+            origin_id=origin_stop_id,
+            dest_id=dest_stop_id,
+        )
+        record = result.single()
+
+        if record is None:
+            raise HTTPException(status_code=404, detail="No route found between those stops")
+
+        path = record["path"]
+        nodes = list(path.nodes)
+        rels = list(path.relationships)
+
+    segments = []
+    total_travel_s = 0
+    lines_used = []
+
+    for idx, rel in enumerate(rels):
+        from_node = nodes[idx]
+        to_node = nodes[idx + 1]
+
+        # Relationship type in Neo4j 5:
+        rel_type = rel.type  # "NEXT" or "TRANSFER"
+
+        # Relationship properties: treat missing as 0
+        avg_travel_s = rel.get("avg_travel_s", 0) if hasattr(rel, "get") else rel.get("avg_travel_s") if "avg_travel_s" in rel else 0  # defensive
+        walk_s = rel.get("walk_s", 0) if hasattr(rel, "get") else rel.get("walk_s") if "walk_s" in rel else 0  # defensive
+        line_id = rel.get("line_id") if hasattr(rel, "get") else rel.get("line_id") if "line_id" in rel else None
+
+        cost = (avg_travel_s or 0) + (walk_s or 0)
+        total_travel_s += cost
+
+        if line_id and line_id not in lines_used:
+            lines_used.append(line_id)
+
+        if walk_s and rel_type == "TRANSFER":
+            # For transfers, we may not have a line_id
+            line_id = "WALK TO TRANSFER"
+        segments.append(
+            {
+                "rel_type": rel_type,
+                "from_stop": {
+                    "stop_id": from_node.get("stop_id"),
+                    "code": from_node.get("code"),
+                    "name": from_node.get("name"),
+                },
+                "to_stop": {
+                    "stop_id": to_node.get("stop_id"),
+                    "code": to_node.get("code"),
+                    "name": to_node.get("name"),
+                },
+                "line_id": line_id,
+                "avg_travel_s": avg_travel_s,
+                "walk_s": walk_s,
+                "cost_s": cost,
+            }
+        )
+
+    return {
+        "origin_stop_id": origin_stop_id,
+        "dest_stop_id": dest_stop_id,
+        "total_hops": len(rels),
+        "total_travel_s": total_travel_s,
+        "lines_used": lines_used,
+        "segments": segments,
+    }
+
+# -----------------------------
+# Lines and History html endpoint
+# -----------------------------
+
+@app.get("/lines", response_class=HTMLResponse)
+async def lines_page(request: Request):
+    """
+    Shows all lines from Oracle in a table (lines.html).
+    Requires the user to be logged in (session cookie).
+    """
+    token = request.cookies.get("session_token")
+    user = None
+
+    if token:
+        user_id = get_user_id_from_token(token)
+        if user_id:
+            user = oracle_users.get_user_by_id(user_id)
+
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+
+    # ---- SIMPLIFIED QUERY HERE ----
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                SELECT
+                    line_id,
+                    code,
+                    name,
+                    line_mode,
+                    active
+                FROM lines
+                ORDER BY code
+                """
+            )
+        )
+        lines = [dict(row._mapping) for row in result]
+
+    return templates.TemplateResponse(
+        "lines.html",
+        {
+            "request": request,
+            "user": user,
+            "lines": lines,
+        },
+    )
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page(
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    if not user:
+        # Optionally redirect to /login, but for now:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+
+    user_id = user["user_id"]
+
+    # 1) Oracle: authoritative trip rows
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text("""
+                SELECT
+                    t.trip_id,
+                    t.planned_start,
+                    t.planned_end,
+                    l.code      AS line_code,
+                    l.name      AS line_name,
+                    s_orig.name AS origin_name,
+                    s_dest.name AS dest_name
+                FROM trips t
+                LEFT JOIN lines l
+                  ON t.line_id = l.line_id
+                LEFT JOIN stops s_orig
+                  ON t.origin_stop_id = s_orig.stop_id
+                LEFT JOIN stops s_dest
+                  ON t.dest_stop_id = s_dest.stop_id
+                WHERE t.user_id = :user_id
+                ORDER BY t.planned_start DESC
+            """),
+            {"user_id": user_id},
+        )
+
+        trips = [
+            {
+                "trip_id": row.trip_id,
+                "line_code": row.line_code,
+                "line_name": row.line_name,
+                "origin_name": row.origin_name,
+                "dest_name": row.dest_name,
+                "planned_start": row.planned_start,
+                "planned_end": row.planned_end,
+            }
+            for row in result
+        ]
+
+    # 2) Mongo: optional user profile + recentTrips
+    profiles_coll = mongo_db["user_profiles"]
+    profile = profiles_coll.find_one({"_id": user_id}) or {}
+    recent_trips_mongo = profile.get("recentTrips", [])
+
+    return templates.TemplateResponse(
+        "history.html",
+        {
+            "request": request,
+            "trips": trips,
+            "recent_trips_mongo": recent_trips_mongo,  # you can use this if you want
+            "user": user,
+        },
+    )
+
 # ---------------------------
 # Existing DB / Redis tests
 # ---------------------------
@@ -353,25 +754,56 @@ def redis_test():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.get("/mongo-test")
 def mongo_test():
     try:
-        # simple ping via a trivial write/read
-        test_coll = mongo_db["__healthcheck"]
-        test_coll.insert_one({"_id": "ping", "value": "ok"})
-        doc = test_coll.find_one({"_id": "ping"})
-        return {"ok": True, "doc": {"_id": str(doc["_id"]), "value": doc["value"]}}
+        lines_count = mongo_db.lines.count_documents({})
+        stops_count = mongo_db.stops.count_documents({})
+        sample = mongo_db.lines.find_one({}, {"_id": 1, "code": 1, "name": 1})
+
+        return {
+            "ok": True,
+            "lines_count": lines_count,
+            "stops_count": stops_count,
+            "sample_line": sample,
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 @app.get("/neo4j-test")
 def neo4j_test():
+    """
+    Simple Neo4j healthcheck:
+    - RUN `RETURN 1 AS ok`
+    - Count nodes and relationships
+    """
     try:
-        with neo4j_driver.session() as session:
-            # Simple query: count all nodes
-            result = session.run("MATCH (n) RETURN count(n) AS cnt")
-            record = result.single()
-            count = record["cnt"] if record else 0
-        return {"ok": True, "node_count": count}
+        driver = get_driver()
+        with driver.session() as session:
+            # Basic ping
+            ping_record = session.run("RETURN 1 AS ok").single()
+            ping_ok = ping_record["ok"]
+
+            # Counts (just for sanity)
+            node_count_record = session.run(
+                "MATCH (n) RETURN count(n) AS c"
+            ).single()
+            rel_count_record = session.run(
+                "MATCH ()-[r]->() RETURN count(r) AS c"
+            ).single()
+
+            node_count = node_count_record["c"]
+            rel_count = rel_count_record["c"]
+
+        return {
+            "ok": True,
+            "ping": ping_ok,
+            "nodes": node_count,
+            "relationships": rel_count,
+        }
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {
+            "ok": False,
+            "error": str(e),
+        }

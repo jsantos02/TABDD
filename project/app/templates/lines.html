@@ -8,7 +8,7 @@
       <th>Code</th>
       <th>Name</th>
       <th>Mode</th>
-      <th>Details (Mongo / schedules)</th>
+      <th>Details (Stops / schedules)</th>
     </tr>
   </thead>
   <tbody>
@@ -16,7 +16,7 @@
     <tr>
       <td>{{ line.code }}</td>
       <td>{{ line.name }}</td>
-      <td>{{ line.mode }}</td>
+      <td>{{ line.line_mode }}</td>
       <td>
         <a href="#" onclick="loadLine('{{ line.line_id }}'); return false;">View</a>
       </td>
