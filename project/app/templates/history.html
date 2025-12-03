@@ -2,39 +2,32 @@
 {% block title %}History{% endblock %}
 {% block content %}
 <h1>Travel history</h1>
-
-<h2>Oracle trips</h2>
 <table>
   <thead>
-  <tr>
-    <th>Line</th>
-    <th>Origin</th>
-    <th>Destination</th>
-    <th>Planned start</th>
-    <th>Planned end</th>
-  </tr>
+    <tr>
+      <th>Lines</th>
+      <th>Origin</th>
+      <th>Destination</th>
+      <th>Planned start</th>
+      <th>Planned end</th>
+    </tr>
   </thead>
   <tbody>
-  {% for t in trips %}
-    <tr>
-      <td>{{ t.line_code }} – {{ t.line_name }}</td>
-      <td>{{ t.origin_name }}</td>
-      <td>{{ t.dest_name }}</td>
-      <td>{{ t.planned_start }}</td>
-      <td>{{ t.planned_end }}</td>
-    </tr>
-  {% endfor %}
+    {% for t in trips %}
+      <tr>
+        <td>
+          {% if t.lines and t.lines|length > 0 %}
+            {{ t.lines|join(' ; ') }}
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td>{{ t.origin_name }}</td>
+        <td>{{ t.dest_name }}</td>
+        <td>{{ t.planned_start }}</td>
+        <td>{{ t.planned_end }}</td>
+      </tr>
+    {% endfor %}
   </tbody>
 </table>
-
-{% if recent_trips_mongo %}
-  <h2>Recent trips (Mongo user_profiles)</h2>
-  <ul>
-  {% for rt in recent_trips_mongo %}
-    <li>
-      {{ rt.at }} — {{ rt.origin }} → {{ rt.dest }} (trip_id: {{ rt.trip_id }})
-    </li>
-  {% endfor %}
-  </ul>
-{% endif %}
 {% endblock %}

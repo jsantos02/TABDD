@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}Plan a trip{% endblock %}
+
+{% block content %}
+<h1>Plan a trip</h1>
+
+<p>
+  Plan a route using the graph (Neo4j), then save it as a trip so it appears in your history.
+</p>
+
+<form id="plan-form">
+  <div>
+    <label for="origin-stop">Origin stop</label><br />
+    <select id="origin-stop" required>
+      <option value="">-- choose origin --</option>
+    </select>
+  </div>
+
+  <div style="margin-top: 8px;">
+    <label for="dest-stop">Destination stop</label><br />
+    <select id="dest-stop" required>
+      <option value="">-- choose destination --</option>
+    </select>
+  </div>
+
+  <div style="margin-top: 8px;">
+    <label for="planned-start">Planned start</label><br />
+    <input id="planned-start" type="datetime-local" required />
+  </div>
+
+  <div style="margin-top: 12px;">
+    <button type="submit">Compute route</button>
+    <button type="button" id="save-trip-btn" disabled>Save trip</button>
+  </div>
+</form>
+
+<hr />
+
+<h2>Route result</h2>
+<div id="route-summary"></div>
+<table id="route-table" border="1" cellpadding="4" cellspacing="0" style="margin-top: 8px; display:none;">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>From</th>
+      <th>To</th>
+      <th>Relation</th>
+      <th>Line</th>
+      <th>Travel (s)</th>
+      <th>Walk (s)</th>
+      <th>Cost (s)</th>
+    </tr>
+  </thead>
+  <tbody id="route-tbody"></tbody>
+</table>
+
+<pre id="route-raw" style="margin-top: 8px; white-space: pre-wrap; display:none;"></pre>
+
+<script>
+
+let allStops = [];
+let lastRoute = null;
+
+async function loadStops() {
+  try {
+    const resp = await fetch('/api/stops');
+    if (!resp.ok) {
+      console.error('Failed /api/stops', resp.status);
+      alert('Failed to load stops: ' + resp.status);
+      return;
+    }
+
+    const data = await resp.json();
+    console.log('Loaded stops:', data.length);
+    allStops = data;
+
+    const originSel = document.getElementById('origin-stop');
+    const destSel = document.getElementById('dest-stop');
+
+    originSel.innerHTML = '<option value="">-- choose origin --</option>';
+    destSel.innerHTML = '<option value="">-- choose destination --</option>';
+
+    data.forEach(s => {
+      const label = `${s.name} (${s.code})`;
+      originSel.add(new Option(label, s.stop_id));
+      destSel.add(new Option(label, s.stop_id));
+    });
+  } catch (e) {
+    console.error('Error loading stops', e);
+    alert('Error loading stops: ' + e);
+  }
+}
+
+function setDefaultPlannedStart() {
+  const input = document.getElementById('planned-start');
+  if (!input.value) {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const value =
+      now.getFullYear() + '-' +
+      pad(now.getMonth() + 1) + '-' +
+      pad(now.getDate()) + 'T' +
+      pad(now.getHours()) + ':' +
+      pad(now.getMinutes());
+    input.value = value;
+  }
+}
+
+async function handlePlanSubmit(ev) {
+  ev.preventDefault();
+
+  const origin = document.getElementById('origin-stop').value;
+  const dest = document.getElementById('dest-stop').value;
+  const plannedStartStr = document.getElementById('planned-start').value;
+
+  if (!origin || !dest) {
+    alert('Please choose both origin and destination.');
+    return;
+  }
+  if (!plannedStartStr) {
+    alert('Please set a planned start time.');
+    return;
+  }
+
+  const url = `/api/route?origin_stop_id=${encodeURIComponent(origin)}&dest_stop_id=${encodeURIComponent(dest)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert('Failed to compute route: ' + (err.detail || resp.status));
+    return;
+  }
+
+  const data = await resp.json();
+  lastRoute = data;
+  renderRoute(data);
+
+  document.getElementById('save-trip-btn').disabled = false;
+}
+
+function renderRoute(route) {
+  const summaryDiv = document.getElementById('route-summary');
+  const table = document.getElementById('route-table');
+  const tbody = document.getElementById('route-tbody');
+
+  tbody.innerHTML = '';
+
+  if (!route.segments || route.segments.length === 0) {
+    summaryDiv.textContent = 'No segments in route.';
+    table.style.display = 'none';
+    return;
+  }
+
+  const minutes = (route.total_travel_s || 0) / 60.0;
+  const linesUsed = route.lines_used && route.lines_used.length
+    ? route.lines_used.join(', ')
+    : 'n/a';
+
+  summaryDiv.textContent =
+    `Total hops: ${route.total_hops} | Total travel ≈ ${minutes.toFixed(1)} min | Lines used: ${linesUsed}`;
+
+  route.segments.forEach((seg, idx) => {
+    const tr = document.createElement('tr');
+
+    const fromLabel = `${seg.from_stop.name} (${seg.from_stop.code})`;
+    const toLabel = `${seg.to_stop.name} (${seg.to_stop.code})`;
+
+    tr.innerHTML = `
+      <td>${idx + 1}</td>
+      <td>${fromLabel}</td>
+      <td>${toLabel}</td>
+      <td>${seg.rel_type}</td>
+      <td>${seg.line_id || ''}</td>
+      <td>${seg.avg_travel_s || 0}</td>
+      <td>${seg.walk_s || 0}</td>
+      <td>${seg.cost_s || 0}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  table.style.display = '';
+}
+
+async function handleSaveTrip() {
+  if (!lastRoute) {
+    alert('Compute a route first.');
+    return;
+  }
+
+  const plannedStartStr = document.getElementById('planned-start').value;
+  if (!plannedStartStr) {
+    alert('Please set a planned start time.');
+    return;
+  }
+
+  const plannedStart = new Date(plannedStartStr);
+  if (isNaN(plannedStart.getTime())) {
+    alert('Invalid planned start time.');
+    return;
+  }
+
+  const travelSeconds = lastRoute.total_travel_s || 0;
+  const plannedEnd = new Date(plannedStart.getTime() + travelSeconds * 1000);
+
+  const plannedStartIso = plannedStart.toISOString();
+  const plannedEndIso = plannedEnd.toISOString();
+
+  let lineId = null;
+  if (lastRoute.lines_used && lastRoute.lines_used.length > 0) {
+    lineId = lastRoute.lines_used[0];
+  }
+
+  const payload = {
+    origin_stop_id: lastRoute.origin_stop_id,
+    dest_stop_id: lastRoute.dest_stop_id,
+    line_id: lineId,
+    planned_start: plannedStartIso,
+    planned_end: plannedEndIso,
+    lines_used: lastRoute.lines_used || []
+  };
+
+  const resp = await fetch('/api/trips', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert('Failed to save trip: ' + (err.detail || resp.status));
+    return;
+  }
+
+  const data = await resp.json();
+  alert('Trip saved! ID: ' + (data.trip_id || '(no id in response)'));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadStops();
+  setDefaultPlannedStart();
+
+  document
+    .getElementById('plan-form')
+    .addEventListener('submit', handlePlanSubmit);
+
+  document
+    .getElementById('save-trip-btn')
+    .addEventListener('click', handleSaveTrip);
+});
+</script>
+{% endblock %}

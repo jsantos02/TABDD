@@ -53,8 +53,20 @@ class TripCreate(BaseModel):
     line_id: Optional[str] = None
     planned_start: datetime
     planned_end: Optional[datetime] = None
+    lines_used: Optional[List[str]] = None
+
+class LineFavoritePayload(BaseModel):
+    line_id: str
+    favorite: bool
 
 
+class StopFavoritePayload(BaseModel):
+    stop_id: str
+    favorite: bool
+
+class PrefsPayload(BaseModel):
+    notifyDisruptions: bool = True
+    units: str = "metric"  # "metric" | "imperial"
 # ---------------------------
 # Session helpers (Redis)
 # ---------------------------
@@ -147,6 +159,26 @@ async def get_current_user(request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     return user
+
+
+def ensure_mongo_profile(db, user_id: str):
+    profiles = db.user_profiles
+    profile = profiles.find_one({"_id": user_id})
+    if not profile:
+        profile = {
+            "_id": user_id,
+            "favorites": {
+                "lines": [],
+                "stops": [],
+            },
+            "prefs": {
+                "notifyDisruptions": True,
+                "units": "metric",
+            },
+            "recentTrips": [],
+        }
+        profiles.insert_one(profile)
+    return profile
 
 
 # ---------------------------
@@ -413,51 +445,38 @@ def oracle_line_detail(line_id: str, current_user=Depends(get_current_user)):
         "stops": [dict(r) for r in stops_rows],
     }
 
+
 @app.post("/api/trips")
 def create_trip(
     trip: TripCreate,
     current_user=Depends(get_current_user),
 ):
-    """
-    Create a trip for the logged-in user.
-
-    - Writes main record into Oracle `trips`
-    - Mirrors summary into MongoDB:
-        - `trips` collection
-        - `user_profiles.recentTrips` (rolling list)
-    """
     user_id = current_user["user_id"]
     now = datetime.now(timezone.utc)
     trip_id = str(uuid.uuid4())
 
-    # --------------------------
-    # 1) Oracle: main history
-    # --------------------------
+    # Decide what goes into lines_used for Mongo
+    if trip.lines_used and len(trip.lines_used) > 0:
+        lines_used = trip.lines_used
+    elif trip.line_id:
+        lines_used = [trip.line_id]
+    else:
+        lines_used = []
+
+    # ----- ORACLE: base trip row -----
     with get_engine().begin() as conn:
         conn.execute(
-            text(
-                """
+            text("""
                 INSERT INTO trips (
-                    trip_id,
-                    user_id,
-                    line_id,
-                    origin_stop_id,
-                    dest_stop_id,
-                    planned_start,
-                    planned_end,
-                    created_at
+                  trip_id, user_id, line_id,
+                  origin_stop_id, dest_stop_id,
+                  planned_start, planned_end, created_at
                 ) VALUES (
-                    :trip_id,
-                    :user_id,
-                    :line_id,
-                    :origin_stop_id,
-                    :dest_stop_id,
-                    :planned_start,
-                    :planned_end,
-                    :created_at
+                  :trip_id, :user_id, :line_id,
+                  :origin_stop_id, :dest_stop_id,
+                  :planned_start, :planned_end, :created_at
                 )
-                """
-            ),
+            """),
             {
                 "trip_id": trip_id,
                 "user_id": user_id,
@@ -470,15 +489,14 @@ def create_trip(
             },
         )
 
-    # --------------------------
-    # 2) MongoDB: mirror trips
-    # --------------------------
+    # ----- MONGO: richer trip document -----
     trips_col = mongo_db["trips"]
     trips_col.insert_one(
         {
             "_id": trip_id,
             "user_id": user_id,
             "line_id": trip.line_id,
+            "lines_used": lines_used,  # full list of lines for history
             "origin_stop": trip.origin_stop_id,
             "dest_stop": trip.dest_stop_id,
             "planned_start": trip.planned_start,
@@ -487,20 +505,15 @@ def create_trip(
         }
     )
 
-    # --------------------------
-    # 3) MongoDB: user_profiles.recentTrips
-    #    (rolling list, e.g. last 10)
-    # --------------------------
+    # ----- MONGO: user_profiles.recentTrips (NO recentTrips in $setOnInsert!) -----
     profiles = mongo_db["user_profiles"]
     profiles.update_one(
         {"_id": user_id},
         {
-            # if user_profile does not exist, create base structure
             "$setOnInsert": {
                 "favorites": {"lines": [], "stops": []},
-                "prefs": {"notifyDisruptions": False, "units": "metric"},
+                "prefs": {},   # whatever default prefs you want
             },
-            # push latest trip, keep only last 10
             "$push": {
                 "recentTrips": {
                     "$each": [
@@ -509,20 +522,17 @@ def create_trip(
                             "at": now,
                             "origin": trip.origin_stop_id,
                             "dest": trip.dest_stop_id,
+                            "lines": lines_used,
                         }
                     ],
-                    "$slice": -10,
+                    "$slice": -10,  # keep last 10
                 }
             },
         },
         upsert=True,
     )
 
-    return {
-        "ok": True,
-        "trip_id": trip_id,
-        "user_id": user_id,
-    }
+    return {"ok": True, "trip_id": trip_id, "user_id": user_id}
 
 
 @app.get("/api/route")
@@ -539,7 +549,7 @@ def get_route(
             MATCH (origin:Stop { stop_id: $origin_id }),
                   (dest:Stop   { stop_id: $dest_id })
             MATCH p = shortestPath(
-                (origin)-[:NEXT|TRANSFER*..50]->(dest)
+                (origin)-[:NEXT|TRANSFER*..50]-(dest)
             )
             RETURN p AS path
             """,
@@ -609,6 +619,122 @@ def get_route(
         "segments": segments,
     }
 
+@app.get("/api/stops")
+def list_stops(current_user=Depends(get_current_user)):
+    """
+    Simple list of all stops from Oracle, for the UI dropdowns.
+    """
+    
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                SELECT
+                    stop_id,
+                    code,
+                    name,
+                    lat,
+                    lon
+                FROM stops
+                ORDER BY name
+                """
+            )
+        )
+        stops = [
+            {
+                "stop_id": row.stop_id,
+                "code": row.code,
+                "name": row.name,
+                "lat": float(row.lat) if row.lat is not None else None,
+                "lon": float(row.lon) if row.lon is not None else None,
+            }
+            for row in result
+        ]
+
+    return stops
+
+@app.post("/api/profile/favorites/lines")
+def set_line_favorite(
+    payload: LineFavoritePayload,
+    current_user=Depends(get_current_user),
+):
+    
+    profiles = mongo_db.user_profiles
+
+    update_doc = {}
+
+    # If this is a new profile, at least give it default prefs.
+    update_doc["$setOnInsert"] = {
+        "prefs": {"notifyDisruptions": True, "units": "metric"},
+        # do NOT set "favorites" here, or you conflict with favorites.lines
+        # do NOT set "recentTrips" here either, or you conflict if other code pushes to it
+    }
+
+    if payload.favorite:
+        update_doc["$addToSet"] = {"favorites.lines": payload.line_id}
+    else:
+        update_doc["$pull"] = {"favorites.lines": payload.line_id}
+
+    profiles.update_one(
+        {"_id": current_user["user_id"]},
+        update_doc,
+        upsert=True,
+    )
+
+    return {"ok": True}
+
+@app.post("/api/profile/favorites/stops")
+def set_stop_favorite(
+    payload: StopFavoritePayload,
+    current_user=Depends(get_current_user),
+):
+    
+    profiles = mongo_db.user_profiles
+
+    update_doc = {}
+
+    update_doc["$setOnInsert"] = {
+        "prefs": {"notifyDisruptions": True, "units": "metric"},
+        # no "favorites" and no "recentTrips" here
+    }
+
+    if payload.favorite:
+        update_doc["$addToSet"] = {"favorites.stops": payload.stop_id}
+    else:
+        update_doc["$pull"] = {"favorites.stops": payload.stop_id}
+
+    profiles.update_one(
+        {"_id": current_user["user_id"]},
+        update_doc,
+        upsert=True,
+    )
+
+    return {"ok": True}
+
+@app.post("/api/profile/prefs")
+def set_prefs(
+    payload: PrefsPayload,
+    current_user=Depends(get_current_user),
+):
+   
+    profiles = mongo_db.user_profiles
+
+    profiles.update_one(
+        {"_id": current_user["user_id"]},
+        {
+            "$set": {
+                "prefs.notifyDisruptions": payload.notifyDisruptions,
+                "prefs.units": payload.units,
+            },
+            "$setOnInsert": {
+                "favorites": {"lines": [], "stops": []},
+                "recentTrips": [],
+            },
+        },
+        upsert=True,
+    )
+
+    return {"ok": True}
 # -----------------------------
 # Lines and History html endpoint
 # -----------------------------
@@ -659,71 +785,187 @@ async def lines_page(request: Request):
 
 
 @app.get("/history", response_class=HTMLResponse)
-def history_page(
-    request: Request,
-    user: dict = Depends(get_current_user),
-):
-    if not user:
-        # Optionally redirect to /login, but for now:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-        )
+def history_page(request: Request, current_user=Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-    user_id = user["user_id"]
+    user_id = current_user["user_id"]
 
-    # 1) Oracle: authoritative trip rows
+    # 1) ORACLE: base trip info
     with get_engine().begin() as conn:
-        result = conn.execute(
-            text("""
+        rows = conn.execute(
+            text(
+                """
                 SELECT
                     t.trip_id,
                     t.planned_start,
                     t.planned_end,
-                    l.code      AS line_code,
-                    l.name      AS line_name,
-                    s_orig.name AS origin_name,
-                    s_dest.name AS dest_name
+                    t.line_id,
+                    o.name AS origin_name,
+                    d.name AS dest_name
                 FROM trips t
-                LEFT JOIN lines l
-                  ON t.line_id = l.line_id
-                LEFT JOIN stops s_orig
-                  ON t.origin_stop_id = s_orig.stop_id
-                LEFT JOIN stops s_dest
-                  ON t.dest_stop_id = s_dest.stop_id
+                  LEFT JOIN stops o ON t.origin_stop_id = o.stop_id
+                  LEFT JOIN stops d ON t.dest_stop_id = d.stop_id
                 WHERE t.user_id = :user_id
                 ORDER BY t.planned_start DESC
-            """),
+                FETCH FIRST 20 ROWS ONLY
+                """
+            ),
             {"user_id": user_id},
+        ).all()
+
+    trips = []
+    for r in rows:
+        trips.append(
+            {
+                "trip_id": r.trip_id,
+                "planned_start": r.planned_start,
+                "planned_end": r.planned_end,
+                "origin_name": r.origin_name,
+                "dest_name": r.dest_name,
+                "line_id": r.line_id,  # may be None for older/multi-line trips
+            }
         )
 
-        trips = [
+    # If no trips, just render
+    if not trips:
+        return templates.TemplateResponse(
+            "history.html",
             {
-                "trip_id": row.trip_id,
-                "line_code": row.line_code,
-                "line_name": row.line_name,
-                "origin_name": row.origin_name,
-                "dest_name": row.dest_name,
-                "planned_start": row.planned_start,
-                "planned_end": row.planned_end,
-            }
-            for row in result
-        ]
+                "request": request,
+                "user": current_user,
+                "trips": [],
+            },
+        )
 
-    # 2) Mongo: optional user profile + recentTrips
-    profiles_coll = mongo_db["user_profiles"]
-    profile = profiles_coll.find_one({"_id": user_id}) or {}
-    recent_trips_mongo = profile.get("recentTrips", [])
+    # 2) MONGO: get lines_used per trip (multi-line journeys)
+    trip_ids = [t["trip_id"] for t in trips]
+
+    lines_used_by_trip = {}
+    mongo_trips = mongo_db["trips"].find(
+        {"_id": {"$in": trip_ids}},
+        {"_id": 1, "lines_used": 1},
+    )
+    for doc in mongo_trips:
+        lines_used_by_trip[doc["_id"]] = doc.get("lines_used", []) or []
+
+    # 3) Final "lines" list per trip: Mongo first, fallback to Oracle line_id
+    for t in trips:
+        lines = lines_used_by_trip.get(t["trip_id"], [])
+        if not lines and t["line_id"]:
+            lines = [t["line_id"]]
+        t["lines"] = lines
 
     return templates.TemplateResponse(
         "history.html",
         {
             "request": request,
+            "user": current_user,
             "trips": trips,
-            "recent_trips_mongo": recent_trips_mongo,  # you can use this if you want
-            "user": user,
         },
     )
+
+
+@app.get("/plan", response_class=HTMLResponse)
+def plan_page(request: Request, current_user=Depends(get_current_user)):
+    return templates.TemplateResponse(
+        "plan.html",
+        {
+            "request": request,
+            "user": current_user,
+        },
+    )
+
+
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, current_user=Depends(get_current_user)):
+    
+    mongo_profile = ensure_mongo_profile(mongo_db, current_user["user_id"])
+
+    favorites = mongo_profile.get("favorites", {})
+    fav_line_ids = favorites.get("lines", [])
+    fav_stop_ids = favorites.get("stops", [])
+
+    fav_line_ids = fav_line_ids or []
+    fav_stop_ids = fav_stop_ids or []
+
+    fav_line_ids_set = set(fav_line_ids)
+    fav_stop_ids_set = set(fav_stop_ids)
+
+    # Load Oracle data for all lines + all stops
+    with get_engine().connect() as conn:
+        lines_rows = conn.execute(
+            text(
+                """
+                SELECT
+                    line_id,
+                    code,
+                    name,
+                    line_mode,
+                    active
+                FROM lines
+                WHERE active = 1
+                ORDER BY line_mode, code
+                """
+            )
+        ).mappings().all()
+
+        stops_rows = conn.execute(
+            text(
+                """
+                SELECT
+                    stop_id,
+                    code,
+                    name
+                FROM stops
+                ORDER BY name
+                """
+            )
+        ).mappings().all()
+
+    # Mark favorites for UI
+    all_lines = []
+    for r in lines_rows:
+        all_lines.append(
+            {
+                "line_id": r["line_id"],
+                "code": r["code"],
+                "name": r["name"],
+                "mode": r["line_mode"],
+                "is_favorite": r["line_id"] in fav_line_ids_set,
+            }
+        )
+
+    all_stops = []
+    for r in stops_rows:
+        all_stops.append(
+            {
+                "stop_id": r["stop_id"],
+                "code": r["code"],
+                "name": r["name"],
+                "is_favorite": r["stop_id"] in fav_stop_ids_set,
+            }
+        )
+
+    prefs = mongo_profile.get("prefs", {})
+    notify_disruptions = prefs.get("notifyDisruptions", True)
+    units = prefs.get("units", "metric")
+
+    return templates.TemplateResponse(
+        "profile.html",
+        {
+            "request": request,
+            "user": current_user,
+            "lines": all_lines,
+            "stops": all_stops,
+            "prefs": {
+                "notifyDisruptions": notify_disruptions,
+                "units": units,
+            },
+        },
+    )
+
+
 
 # ---------------------------
 # Existing DB / Redis tests

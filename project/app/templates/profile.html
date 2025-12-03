@@ -1,29 +1,141 @@
 {% extends "base.html" %}
 {% block title %}Profile{% endblock %}
+
 {% block content %}
 <h1>Profile</h1>
 
-<p><strong>User:</strong> {{ user.full_name }} ({{ user.email }})</p>
+<p><strong>Name:</strong> {{ user.full_name }}</p>
+<p><strong>Email:</strong> {{ user.email }}</p>
 
-<h2>Favorites</h2>
-<form method="post" action="/profile/favorites">
-  <div>
-    <label>Favorite line IDs (comma separated)</label><br />
-    <input type="text" name="lines"
-           value="{{ profile.favorites.lines | join(',') }}" />
-  </div>
-  <div>
-    <label>Favorite stop IDs (comma separated)</label><br />
-    <input type="text" name="stops"
-           value="{{ profile.favorites.stops | join(',') }}" />
-  </div>
-  <button type="submit">Save</button>
+<hr>
+
+<h2>Favorite lines</h2>
+<p>You can mark lines as favorites. This is stored in MongoDB, while line info comes from Oracle.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Name</th>
+      <th>Mode</th>
+      <th>Favorite</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for line in lines %}
+    <tr>
+      <td>{{ line.code }}</td>
+      <td>{{ line.name }}</td>
+      <td>{{ line.mode }}</td>
+      <td>
+        {% if line.is_favorite %}
+          <button onclick="setFavoriteLine('{{ line.line_id }}', false)">★ Remove</button>
+        {% else %}
+          <button onclick="setFavoriteLine('{{ line.line_id }}', true)">☆ Add</button>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<hr>
+
+<h2>Favorite stops</h2>
+<p>Mark stops you use frequently (also stored in MongoDB, stop details from Oracle).</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Name</th>
+      <th>Favorite</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in stops %}
+    <tr>
+      <td>{{ s.code }}</td>
+      <td>{{ s.name }}</td>
+      <td>
+        {% if s.is_favorite %}
+          <button onclick="setFavoriteStop('{{ s.stop_id }}', false)">★ Remove</button>
+        {% else %}
+          <button onclick="setFavoriteStop('{{ s.stop_id }}', true)">☆ Add</button>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<hr>
+
+<h2>Preferences</h2>
+<form id="prefs-form" onsubmit="savePrefs(event)">
+  <label>
+    <input type="checkbox" id="notifyDisruptions" {% if prefs.notifyDisruptions %}checked{% endif %}>
+    Notify me about disruptions
+  </label>
+  <br>
+  <label>
+    Units:
+    <select id="units">
+      <option value="metric" {% if prefs.units == "metric" %}selected{% endif %}>Metric (km)</option>
+      <option value="imperial" {% if prefs.units == "imperial" %}selected{% endif %}>Imperial (mi)</option>
+    </select>
+  </label>
+  <br>
+  <button type="submit">Save preferences</button>
 </form>
 
-<h2>Recent trips (from Mongo profile)</h2>
-<ul>
-  {% for t in profile.recentTrips %}
-    <li>{{ t.at }}: {{ t.origin }} → {{ t.dest }} (trip {{ t.trip_id }})</li>
-  {% endfor %}
-</ul>
+<p id="prefs-status" style="color: green; display:none;">Preferences saved!</p>
+
+<script>
+async function setFavoriteLine(lineId, favorite) {
+  const resp = await fetch('/api/profile/favorites/lines', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ line_id: lineId, favorite: favorite })
+  });
+  if (resp.ok) {
+    location.reload();
+  } else {
+    alert('Failed to update favorite line');
+  }
+}
+
+async function setFavoriteStop(stopId, favorite) {
+  const resp = await fetch('/api/profile/favorites/stops', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stop_id: stopId, favorite: favorite })
+  });
+  if (resp.ok) {
+    location.reload();
+  } else {
+    alert('Failed to update favorite stop');
+  }
+}
+
+async function savePrefs(evt) {
+  evt.preventDefault();
+  const notify = document.getElementById('notifyDisruptions').checked;
+  const units = document.getElementById('units').value;
+
+  const resp = await fetch('/api/profile/prefs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notifyDisruptions: notify, units: units })
+  });
+
+  if (resp.ok) {
+    const status = document.getElementById('prefs-status');
+    status.style.display = 'inline';
+    setTimeout(() => { status.style.display = 'none'; }, 2000);
+  } else {
+    alert('Failed to save preferences');
+  }
+}
+</script>
 {% endblock %}
