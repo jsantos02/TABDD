@@ -209,6 +209,14 @@ db.createCollection("line_schedules", {
   }
 });
 
+// vehicles
+
+db.vehicles.createIndex({ line: 1 });
+db.vehicles.createIndex({ "lastKnown.ts": -1 });
+db.vehicles.createIndex({ "lastKnown.loc": "2dsphere" });
+
+
+
 // #################
 // Neo4j (Graph DB)
 // #################

@@ -1,0 +1,33 @@
+const lines = db.lines.find().toArray();
+
+lines.forEach(l => {
+  const model = l.mode === "metro" ? "CRRC Tram" : "Mercedez-Benz Citaro";
+  const capacity = l.mode === "metro" ? 244 : 44;
+
+  const vehicles = [
+    {
+      _id: `VEH_${l.code}_01`,
+      plate: `PT-${l.code}-01`,
+      model,
+      capacity,
+      features: { lowFloor: true, aircon: l.mode !== "metro" },
+      line: l._id
+    },
+    {
+      _id: `VEH_${l.code}_02`,
+      plate: `PT-${l.code}-02`,
+      model,
+      capacity,
+      features: { lowFloor: true, aircon: l.mode !== "metro" },
+      line: l._id
+    }
+  ];
+
+  vehicles.forEach(v => {
+    db.vehicles.updateOne(
+      { _id: v._id },
+      { $setOnInsert: v },
+      { upsert: true }
+    );
+  });
+});

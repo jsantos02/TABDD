@@ -1,0 +1,539 @@
+{% extends "base.html" %}
+{% block title %}Live Vehicles{% endblock %}
+
+{% block content %}
+<h1>Live Vehicles</h1>
+<p>Track vehicles assigned to a line in near real time.</p>
+
+<!-- Controls -->
+<div style="display:flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px;">
+  <label for="lineSelect"><b>Line</b></label>
+  <select id="lineSelect"></select>
+
+  <button id="refreshBtn" type="button">Refresh now</button>
+
+  <label style="display:flex; align-items:center; gap: 6px;">
+    <input type="checkbox" id="autoRefresh" checked />
+    Auto refresh
+  </label>
+
+  <label>
+    Interval (s)
+    <input type="number" id="intervalSec" min="2" value="5" style="width:70px;" />
+  </label>
+
+  <label style="display:flex; align-items:center; gap: 6px;">
+    <input type="checkbox" id="showOnlyTracked" />
+    Show only tracked
+  </label>
+
+  <button id="clearTrackBtn" type="button">Clear track</button>
+</div>
+
+<div id="status" style="margin: 10px 0;"></div>
+
+<!-- Map + Table layout -->
+<div style="display:grid; grid-template-columns: 1fr; gap: 14px;">
+  <div style="border:1px solid #ddd; border-radius: 8px; padding: 8px;">
+    <div style="display:flex; justify-content: space-between; align-items:center; gap: 8px; flex-wrap: wrap;">
+      <b>Live map</b>
+      <span id="trackInfo" style="opacity:0.8;"></span>
+    </div>
+    <div id="map" style="height: 260px; width: 100%; border-radius: 6px; margin-top: 8px;"></div>
+  </div>
+
+  <div id="liveContainer"></div>
+</div>
+
+<!-- Leaflet -->
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+  const lineSelect = document.getElementById("lineSelect");
+  const refreshBtn = document.getElementById("refreshBtn");
+  const autoRefresh = document.getElementById("autoRefresh");
+  const intervalSecInput = document.getElementById("intervalSec");
+  const statusEl = document.getElementById("status");
+  const liveContainer = document.getElementById("liveContainer");
+  const showOnlyTracked = document.getElementById("showOnlyTracked");
+  const clearTrackBtn = document.getElementById("clearTrackBtn");
+  const trackInfo = document.getElementById("trackInfo");
+
+  let timer = null;
+
+  // ---- Tracking state ----
+  const TRACK_KEY = "live_tracked_vehicle_id";
+  function getTrackedVehicleId() {
+    return localStorage.getItem(TRACK_KEY) || "";
+  }
+  function setTrackedVehicleId(id) {
+    if (id) localStorage.setItem(TRACK_KEY, id);
+    else localStorage.removeItem(TRACK_KEY);
+    updateTrackInfo();
+  }
+  function updateTrackInfo() {
+    const id = getTrackedVehicleId();
+    trackInfo.textContent = id ? `Tracking: ${id}` : "Not tracking any vehicle";
+  }
+
+  // ---- Map state ----
+  let map = null;
+  let markersByVehicleId = new Map();
+  let lastCenter = null;
+
+  function initMap() {
+    if (map) return;
+
+    // Default center: Porto-ish, but we’ll adjust once we have data.
+    map = L.map("map");
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    const defaultLat = 41.1579;
+    const defaultLon = -8.6291;
+
+    map.setView([defaultLat, defaultLon], 12);
+    lastCenter = [defaultLat, defaultLon];
+  }
+
+  function setStatus(msg, isError=false) {
+    statusEl.textContent = msg || "";
+    statusEl.style.color = isError ? "crimson" : "inherit";
+  }
+
+  // ---- Helpers to normalize API shapes ----
+  function pick(obj, keys, fallback=null) {
+    for (const k of keys) {
+      if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+    }
+    return fallback;
+  }
+
+  function normalizeStop(stopLike) {
+    if (!stopLike) return null;
+    // If stopLike is a string assume stop_id
+    if (typeof stopLike === "string") {
+      return { stop_id: stopLike, name: stopLike, code: "" };
+    }
+    return {
+      stop_id: pick(stopLike, ["stop_id", "id", "_id"], ""),
+      name: pick(stopLike, ["name", "stop_name"], pick(stopLike, ["stop_id", "id", "_id"], "")),
+      code: pick(stopLike, ["code"], "")
+    };
+  }
+
+  function getCoords(vehicle) {
+    const lk = vehicle.lastKnown || {};
+    const loc = lk.loc || {};
+    const coords = loc.coordinates;
+
+    if (Array.isArray(coords) && coords.length >= 2) {
+      const lon = coords[0];
+      const lat = coords[1];
+      if (typeof lat === "number" && typeof lon === "number") {
+        return { lat, lon };
+      }
+    }
+
+    // Fallbacks if your API returns flat fields
+    const lat = pick(vehicle, ["lat", "latitude"], null);
+    const lon = pick(vehicle, ["lon", "lng", "longitude"], null);
+    if (typeof lat === "number" && typeof lon === "number") {
+      return { lat, lon };
+    }
+
+    return null;
+  }
+
+function getEtaSec(vehicle) {
+  // Try seconds-like fields
+  const sec = pick(vehicle, [
+    "eta_to_next_stop_s",
+    "etaToNextStopS",
+    "eta_s",
+    "etaSec",
+    "etaSeconds"
+  ], null);
+
+  if (typeof sec === "number") return sec;
+
+  // Try milliseconds
+  const ms = pick(vehicle, [
+    "eta_to_next_stop_ms",
+    "etaToNextStopMs",
+    "eta_ms",
+    "etaMs"
+  ], null);
+
+  if (typeof ms === "number") return Math.round(ms / 1000);
+
+  // Try minutes-like fields
+  const min = pick(vehicle, [
+    "eta_to_next_stop_min",
+    "etaToNextStopMin",
+    "eta_min",
+    "etaMin",
+    "eta_minutes",
+    "etaMinutes"
+  ], null);
+
+  if (typeof min === "number") return Math.round(min * 60);
+
+  // Sometimes API returns nested ETA object
+  const nested = pick(vehicle, ["eta"], null);
+  if (nested && typeof nested === "object") {
+    const nSec = pick(nested, ["s", "sec", "seconds"], null);
+    if (typeof nSec === "number") return nSec;
+    const nMin = pick(nested, ["min", "minutes"], null);
+    if (typeof nMin === "number") return Math.round(nMin * 60);
+  }
+
+  return null;
+}
+
+function getStatusText(v) {
+  // Prefer explicit status string if API provides it
+  const statusStr = pick(v, ["status"], null);
+  if (typeof statusStr === "string" && statusStr.trim()) return statusStr;
+
+  // Your previous "active" boolean
+  if (v.active === true) return "✅ Active";
+  if (v.active === false) return "⛔ Inactive";
+
+  // Assignment-related hints if your API includes them
+  const hasAssignment =
+    !!pick(v, ["assignment_id", "assignmentId", "driver_id", "driverId"], null);
+
+  if (hasAssignment) return "🧑‍✈️ Assigned";
+
+  // If we have coordinates, it’s at least "running-ish"
+  const coords = getCoords(v);
+  if (coords) return "🛰️ Reporting";
+
+  return "-";
+}
+
+
+  function normalizeVehicle(v) {
+    const vehicleId = pick(v, ["vehicle_id", "_id", "id"], "-");
+    const plate = pick(v, ["plate"], "");
+    const model = pick(v, ["model"], "");
+    const capacity = pick(v, ["capacity"], "");
+
+    const active = pick(v, ["active"], null);
+
+    const departedStop = normalizeStop(pick(v, ["departed_stop", "departedStop"], null));
+    const currentStop = normalizeStop(pick(v, ["current_stop", "currentStop", "current_stop_obj"], null));
+    const nextStop = normalizeStop(pick(v, ["next_stop", "nextStop", "next_stop_obj"], null));
+
+    // Sometimes API might provide only IDs for stops:
+    const currentStopIdOnly = pick(v, ["current_stop_id", "currentStopId"], null);
+    const nextStopIdOnly = pick(v, ["next_stop_id", "nextStopId"], null);
+
+    const currentResolved = currentStop || normalizeStop(currentStopIdOnly);
+    const nextResolved = nextStop || normalizeStop(nextStopIdOnly);
+
+    const etaSec = getEtaSec(v);
+    const coords = getCoords(v);
+
+    return {
+    raw: v,
+    vehicleId,
+    plate,
+    model,
+    capacity,
+    active,
+    departedStop,
+    nextStop: nextResolved,
+    etaSec,
+    coords
+    };
+
+  }
+
+  // ---- Lines loader (defensive) ----
+  async function loadLines() {
+    const candidates = [
+      "/api/lines-oracle",
+      "/api/lines/oracle",
+      "/api/lines"
+    ];
+
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (!Array.isArray(data)) continue;
+
+        lineSelect.innerHTML = "";
+        data.forEach(l => {
+          const opt = document.createElement("option");
+          opt.value = l.line_id || l._id || l.id;
+          const code = l.code ? `${l.code} - ` : "";
+          const name = l.name || "";
+          const mode = l.mode || l.line_mode || "";
+          opt.textContent = `${code}${name}${mode ? " (" + mode + ")" : ""}`;
+          lineSelect.appendChild(opt);
+        });
+
+        return lineSelect.options.length > 0;
+      } catch (e) {}
+    }
+
+    return false;
+  }
+
+  // ---- Map rendering ----
+  function clearMarkers() {
+    for (const m of markersByVehicleId.values()) {
+      try { map.removeLayer(m); } catch (_) {}
+    }
+    markersByVehicleId.clear();
+  }
+
+  function renderMarkers(vehicles) {
+    initMap();
+    clearMarkers();
+
+    const trackedId = getTrackedVehicleId();
+
+    let firstCoord = null;
+
+    vehicles.forEach(v => {
+      if (!v.coords) return;
+
+      const { lat, lon } = v.coords;
+      if (!firstCoord) firstCoord = [lat, lon];
+
+      const labelParts = [
+        `<b>${v.vehicleId}</b>`,
+        v.plate ? `Plate: ${v.plate}` : "",
+        v.model ? `Model: ${v.model}` : "",
+        v.nextStop?.name ? `Next: ${v.nextStop.name}` : ""
+      ].filter(Boolean);
+
+      const popupHtml = labelParts.join("<br/>");
+
+      const marker = L.marker([lat, lon]).addTo(map).bindPopup(popupHtml);
+
+      markersByVehicleId.set(v.vehicleId, marker);
+
+      // Open popup for tracked vehicle
+      if (trackedId && v.vehicleId === trackedId) {
+        marker.openPopup();
+      }
+    });
+
+    // Auto-center logic:
+    const trackedVehicle = vehicles.find(v => v.vehicleId === trackedId && v.coords);
+    if (trackedVehicle && trackedVehicle.coords) {
+      const { lat, lon } = trackedVehicle.coords;
+      map.setView([lat, lon], Math.max(map.getZoom() || 13, 14));
+      lastCenter = [lat, lon];
+      return;
+    }
+
+    // Otherwise center on first marker if map never centered by data
+    if (firstCoord && !lastCenter) {
+      map.setView(firstCoord, 13);
+      lastCenter = firstCoord;
+    } else if (firstCoord && lastCenter) {
+      // keep current view
+    }
+  }
+
+  // ---- Table rendering ----
+  function renderVehicles(lineId, payload) {
+    const note = payload.note;
+    const rawVehicles = payload.vehicles || [];
+
+    const normalized = rawVehicles.map(normalizeVehicle);
+
+    const trackedId = getTrackedVehicleId();
+    const filtered = showOnlyTracked.checked && trackedId
+      ? normalized.filter(v => v.vehicleId === trackedId)
+      : normalized;
+
+    if (note && filtered.length === 0) {
+      liveContainer.innerHTML = `
+        <div style="padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
+          <b>${lineId}</b><br/>
+          <span>${note}</span>
+        </div>
+      `;
+      renderMarkers([]); // clear map
+      return;
+    }
+
+    if (!filtered.length) {
+      liveContainer.innerHTML = `
+        <div style="padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
+          <b>${lineId}</b><br/>
+          <span>No vehicles returned.</span>
+        </div>
+      `;
+      renderMarkers([]); // clear map
+      return;
+    }
+
+        const rows = filtered.map(v => {
+    const statusText = getStatusText(v.raw);
+
+    const departedName = v.departedStop?.name || "-";
+    const nextName = v.nextStop?.name || "-";
+
+    const etaMin = (v.etaSec != null)
+        ? Math.max(0, Math.round(v.etaSec / 60))
+        : "-";
+
+    const coordText = v.coords
+        ? `${v.coords.lat.toFixed(5)}, ${v.coords.lon.toFixed(5)}`
+        : "-";
+
+    const isTracked = getTrackedVehicleId() === v.vehicleId;
+
+    return `
+        <tr>
+        <td>${v.vehicleId}</td>
+        <td>${v.plate}</td>
+        <td>${v.model}</td>
+        <td>${v.capacity}</td>
+        <td>${statusText}</td>
+        <td>${departedName}</td>
+        <td>${nextName}</td>
+        <td>${etaMin}</td>
+        <td>${coordText}</td>
+        <td>
+            <button type="button" data-track-id="${v.vehicleId}">
+            ${isTracked ? "★ Tracking" : "Track"}
+            </button>
+        </td>
+        </tr>
+    `;
+    }).join("");
+
+    liveContainer.innerHTML = `
+    <div style="overflow-x:auto;">
+        <table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse: collapse;">
+        <thead>
+            <tr>
+            <th>Vehicle</th>
+            <th>Plate</th>
+            <th>Model</th>
+            <th>Capacity</th>
+            <th>Status</th>
+            <th>Departed from</th>
+            <th>Next stop</th>
+            <th>ETA (min)</th>
+            <th>Coordinates</th>
+            <th>Track</th>
+            </tr>
+        </thead>
+        <tbody>
+            ${rows}
+        </tbody>
+        </table>
+    </div>
+    `;
+
+
+    // Attach track handlers
+    liveContainer.querySelectorAll("button[data-track-id]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-track-id");
+        if (!id) return;
+
+        const current = getTrackedVehicleId();
+        setTrackedVehicleId(current === id ? "" : id);
+
+        // Re-render quickly to update button label and recenter map
+        renderVehicles(lineId, payload);
+        renderMarkers(normalized);
+      });
+    });
+
+    renderMarkers(normalized);
+  }
+
+  // ---- Fetch live data ----
+  async function fetchLive() {
+    const lineId = lineSelect.value;
+    if (!lineId) return;
+
+    setStatus("Loading live data...");
+    try {
+      const res = await fetch(`/api/live/${encodeURIComponent(lineId)}`);
+      if (!res.ok) {
+        const txt = await res.text();
+        setStatus(`Error loading ${lineId}: ${res.status}`, true);
+        liveContainer.innerHTML = `<pre>${txt}</pre>`;
+        renderMarkers([]);
+        return;
+      }
+
+      const payload = await res.json();
+      renderVehicles(lineId, payload);
+      setStatus(`Updated ${lineId} @ ${new Date().toLocaleTimeString()}`);
+    } catch (err) {
+      setStatus("Network error while loading live data.", true);
+    }
+  }
+
+  function startTimer() {
+    stopTimer();
+    if (!autoRefresh.checked) return;
+
+    const sec = Math.max(2, parseInt(intervalSecInput.value || "5", 10));
+    timer = setInterval(fetchLive, sec * 1000);
+  }
+
+  function stopTimer() {
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+
+  refreshBtn.addEventListener("click", fetchLive);
+  autoRefresh.addEventListener("change", startTimer);
+  intervalSecInput.addEventListener("change", startTimer);
+
+  showOnlyTracked.addEventListener("change", fetchLive);
+
+  clearTrackBtn.addEventListener("click", () => {
+    setTrackedVehicleId("");
+    fetchLive();
+  });
+
+  lineSelect.addEventListener("change", () => {
+    fetchLive();
+    startTimer();
+  });
+
+  (async function init() {
+    updateTrackInfo();
+    initMap();
+
+    const ok = await loadLines();
+    if (!ok) {
+      setStatus("Could not load lines list. Using fallback list.", true);
+      lineSelect.innerHTML = `
+        <option value="LINE_M_A">LINE_M_A</option>
+        <option value="LINE_M_D">LINE_M_D</option>
+        <option value="LINE_M_E">LINE_M_E</option>
+        <option value="LINE_B_500">LINE_B_500</option>
+        <option value="LINE_B_600">LINE_B_600</option>
+        <option value="LINE_B_901">LINE_B_901</option>
+      `;
+    }
+
+    await fetchLive();
+    startTimer();
+  })();
+</script>
+{% endblock %}
