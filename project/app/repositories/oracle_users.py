@@ -63,7 +63,6 @@ def create_user(email: str, password: str, full_name: str, role: str = "passenge
     return user_id
 
 def get_all_users():
-    """Fetches all users for the admin dashboard."""
     sql = text("""
         SELECT user_id, email, full_name, role, is_active, created_at
         FROM users
@@ -74,7 +73,6 @@ def get_all_users():
         return [dict(row) for row in rows]
 
 def update_user_status(user_id: str, is_active: bool):
-    """Toggles the is_active status of a user."""
     sql = text("""
         UPDATE users
         SET is_active = :is_active

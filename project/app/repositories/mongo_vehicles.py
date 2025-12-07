@@ -14,8 +14,8 @@ def get_line_itinerary(line_id: str) -> List[Dict]:
     # Ensure sorted by sequence
     return sorted(itinerary, key=lambda x: x.get("seq", 0))
 
+# gets coordinates for stops
 def get_stops_metadata(stop_ids: List[str]):
-    """Returns (coords_map, meta_map)."""
     cursor = mongo_db.stops.find(
         {"_id": {"$in": stop_ids}},
         {"_id": 1, "code": 1, "name": 1, "location": 1}
@@ -36,14 +36,13 @@ def get_stops_metadata(stop_ids: List[str]):
     return coords_map, meta_map
 
 def get_vehicles_by_ids(vehicle_ids: List[str], line_id: str) -> List[Dict]:
-    """Fetches vehicles. If specific IDs provided, fetch those; else fetch all for line."""
+    
     query = {"line": line_id}
     if vehicle_ids:
         query["_id"] = {"$in": vehicle_ids}
     return list(mongo_db.vehicles.find(query))
 
 def update_vehicle_simulation(vehicle_id: str, sim_data: Dict, location: Optional[Dict], now_ts: datetime):
-    """Updates the vehicle's simulated position and internal state."""
     update = {
         "$set": {
             "sim.idx": sim_data["idx"],

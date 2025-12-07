@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from app.db.oracle import get_engine
 from app.db.redis import redis_client
 from app.config import settings
-from app.repositories import oracle_users, oracle_sessions, oracle_lines, oracle_trips, oracle_ops, mongo_trips, mongo_profiles, mongo_feedback
+from app.repositories import oracle_users, oracle_sessions, oracle_lines, oracle_trips, oracle_ops, mongo_trips, mongo_profiles, mongo_feedback, mongo_lines
 from app.services import routing_service, live_service, alert_service
 from app.db.mongo import mongo_db
 from app.db.neo4j import get_driver
@@ -382,7 +382,7 @@ def api_list_lines(_=Depends(get_current_user)):
 @app.get("/api/lines/{line_id}")
 def line_detail(line_id: str, _=Depends(get_current_user)):
 
-    doc = mongo_db.lines.find_one({"_id": line_id})
+    doc = mongo_lines.get_line_by_id(line_id)
 
     if not doc:
         raise HTTPException(status_code=404, detail="Line not found in MongoDB")
@@ -496,19 +496,9 @@ def create_alert(payload: AdminAlertCreate, _=Depends(get_current_admin)):
         "to": end_time
     }
     
-    # Update MongoDB
-    result = mongo_db.lines.update_one(
-        {"_id": payload.line_id},
-        {"$push": {"alerts": new_alert}}
-    )
-    
-    if result.modified_count == 0:
-        result = mongo_db.lines.update_one(
-            {"line_id": payload.line_id},
-            {"$push": {"alerts": new_alert}}
-        )
+    modified_count = mongo_lines.add_alert(payload.line_id, new_alert)
 
-    return {"ok": True, "modified": result.modified_count}
+    return {"ok": True, "modified": modified_count}
 
 @app.post("/api/admin/users/{user_id}/status")
 def toggle_user_status(user_id: str, payload: UserStatusUpdate, _=Depends(get_current_admin)):
@@ -621,14 +611,7 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
     # Fetch enrichment data from MongoDB
     trip_ids = [t["trip_id"] for t in trips]
     
-    # Batch fetch extra data (lines, distance, units)
-    mongo_trips_cursor = mongo_db["trips"].find(
-        {"_id": {"$in": trip_ids}},
-        {"_id": 1, "lines_used": 1, "total_distance": 1, "distance_unit": 1},
-    )
-    
-
-    extra_data_by_trip = {doc["_id"]: doc for doc in mongo_trips_cursor}
+    extra_data_by_trip = mongo_trips.get_trip_details_by_ids(trip_ids)
 
     # Fetch User Preferences for Unit Conversion
     user_id = current_user["user_id"]

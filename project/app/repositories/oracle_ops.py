@@ -26,11 +26,8 @@ def create_assignment(assignment_id: str, driver_id: str, vehicle_id: str, line_
             "aid": assignment_id, "did": driver_id, "vid": vehicle_id, "lid": line_id
         })
 
+# active driver assignemnts by line
 def get_active_assignments(line_id: str) -> Dict[str, Dict]:
-    """
-    Returns a map of vehicle_id -> {assignment_id, driver_id} 
-    for drivers currently on shift.
-    """
     sql = text("""
         SELECT assignment_id, vehicle_id, driver_id
         FROM driver_assignments

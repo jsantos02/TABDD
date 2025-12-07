@@ -6,9 +6,7 @@ from app.db.oracle import get_engine
 
 def run_benchmark():
     engine = get_engine()
-    
-    # This query matches the index: (line_id, start_ts)
-    # We look for assignments for LINE_M_A that started after 2024
+    # Oracle SQL already has the index in place on driver_assignments(line_id, start_ts)
     sql_with_index = text("""
         SELECT count(*) 
         FROM driver_assignments 
@@ -16,7 +14,7 @@ def run_benchmark():
           AND start_ts > TO_TIMESTAMP(:ts, 'YYYY-MM-DD HH24:MI:SS')
     """)
 
-    # This forces Oracle to ignore the index and do a FULL TABLE SCAN
+    # forces Oracle to ignore the index and do a full table scan
     sql_no_index = text("""
         SELECT /*+ NO_INDEX(driver_assignments idx_driver_assignments_active) */ count(*) 
         FROM driver_assignments 
@@ -30,10 +28,10 @@ def run_benchmark():
     print(f"--- ORACLE BENCHMARK ({iterations} iterations) ---")
 
     with engine.connect() as conn:
-        # 1. Warm up (optional connection overhead)
+        # Warm up (optional connection overhead)
         conn.execute(text("SELECT 1 FROM dual"))
 
-        # 2. Test WITH Index
+        # Test WITH Index first
         start = time.time()
         for _ in range(iterations):
             conn.execute(sql_with_index, params)
@@ -41,7 +39,7 @@ def run_benchmark():
         time_index = end - start
         print(f"WITH Index:    {time_index:.4f} seconds")
 
-        # 3. Test WITHOUT Index
+        # Test WITHOUT Index next
         start = time.time()
         for _ in range(iterations):
             conn.execute(sql_no_index, params)

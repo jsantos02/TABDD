@@ -10,7 +10,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
     return 6371 * 2 * math.asin(math.sqrt(a))
 
 def find_best_route(origin_id: str, dest_id: str, units: str = "metric"):
-    # 1. Neo4j Pathfinding
+    # Neo4j Pathfinding
     driver = get_driver()
     with driver.session() as session:
         result = session.run("""
@@ -30,7 +30,7 @@ def find_best_route(origin_id: str, dest_id: str, units: str = "metric"):
     segments, lines_used, stop_ids = [], set(), set()
     total_travel_s = 0
 
-    # 2. Build Segments
+    # Build Segments
     for i, rel in enumerate(rels):
         from_n, to_n = nodes[i], nodes[i+1]
         line_id = rel.get("line_id")
@@ -55,11 +55,11 @@ def find_best_route(origin_id: str, dest_id: str, units: str = "metric"):
             "cost_s": cost
         })
 
-    # 3. Enrich with Oracle Data
+    # Oracle lines and stops
     o_lines = oracle_lines.get_lines_by_ids(list(lines_used))
     o_stops = oracle_lines.get_stops_by_ids(list(stop_ids))
 
-    # 4. Calculate Distances
+    # Calculate Distances
     total_dist_km = 0.0
     for seg in segments:
         f_stop = o_stops.get(seg["from_stop"]["stop_id"], {})
@@ -73,7 +73,7 @@ def find_best_route(origin_id: str, dest_id: str, units: str = "metric"):
         seg["dist_km"] = dist
         total_dist_km += dist
 
-    # 5. Enrich with Mongo Data
+    # Import MongoDB line data 
     mongo_docs = mongo_lines.get_lines_by_ids(list(lines_used))
     
     mongo_map = {d["_id"]: d for d in mongo_docs}

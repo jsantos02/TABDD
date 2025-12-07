@@ -27,7 +27,6 @@ def _advance_segment(itinerary, idx, segment_start, now):
     idx = max(0, min(idx, len(itinerary) - 2))
 
     while True:
-        # Default 300s (5 min) if missing
         travel_s = int(itinerary[idx].get("avgStopSec") or 300) 
         elapsed = (now - segment_start).total_seconds()
 
@@ -44,7 +43,7 @@ def _advance_segment(itinerary, idx, segment_start, now):
             idx = 0
 
 def calculate_positions(line_id: str):
-    # 1. Fetch Data
+    # Fetch Data
     itinerary = mongo_vehicles.get_line_itinerary(line_id)
     if not itinerary or len(itinerary) < 2:
         return {"error": "Itinerary missing or too short"}
@@ -65,7 +64,7 @@ def calculate_positions(line_id: str):
     else:
         note = None
 
-    # 2. Simulate Each Vehicle
+    # Simulate vehicles
     for v in vehicles:
         sim = v.get("sim") or {}
         idx = int(sim.get("idx") or 0)
@@ -85,7 +84,7 @@ def calculate_positions(line_id: str):
             lon, lat = _interpolate(coords_map[from_stop], coords_map[to_stop], progress)
             loc_obj = {"type": "Point", "coordinates": [lon, lat]}
 
-        # 3. Write Side-Effect (Ideally moved to background task, but kept here for now via Repo)
+        # Update vehicle simulation state
         mongo_vehicles.update_vehicle_simulation(
             v["_id"], 
             {"idx": new_idx, "segment_start_ts": new_seg_start},
@@ -93,7 +92,6 @@ def calculate_positions(line_id: str):
             now
         )
 
-        # 4. Build Response
         remaining_s = max(int(travel_s - elapsed), 0)
         assign_info = assignment_map.get(str(v.get("_id")))
         
