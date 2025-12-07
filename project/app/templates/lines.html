@@ -29,9 +29,33 @@
 
 <script>
 async function loadLine(lineId) {
-  const r = await fetch(`/api/lines/${lineId}`);
+  const r = await fetch(`/api/oracle/lines/${lineId}`);
   const data = await r.json();
-  document.getElementById('line-detail').textContent = JSON.stringify(data, null, 2);
+  
+  let html = `<h3>${data.line.code} - ${data.line.name}</h3>`;
+  
+  // Schedules Section
+  html += `<h4>Operating Hours</h4><ul>`;
+  // Although indifferent in this project since the stops are seeded the same.
+  if (data.schedules && data.schedules.length > 0) {
+      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]; 
+
+      data.schedules.forEach(sch => {
+          html += `<li>Day ${sch.dow}: ${sch.start_str} - ${sch.end_str} (Every ${sch.headway_minutes} min)</li>`;
+      });
+  } else {
+      html += `<li>No schedule info available</li>`;
+  }
+  html += `</ul>`;
+
+  // Stops Section
+  html += `<h4>Stops</h4><ol>`;
+  data.stops.forEach(s => {
+      html += `<li>${s.name} (${s.code})</li>`;
+  });
+  html += `</ol>`;
+
+  document.getElementById('line-detail').innerHTML = html;
 }
 </script>
 {% endblock %}

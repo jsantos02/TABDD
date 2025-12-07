@@ -54,6 +54,8 @@ class TripCreate(BaseModel):
     planned_start: datetime
     planned_end: Optional[datetime] = None
     lines_used: Optional[List[str]] = None
+    total_distance: float = 0.0
+    distance_unit: str = "metric"
 
 class LineFavoritePayload(BaseModel):
     line_id: str
@@ -74,7 +76,7 @@ class FeedbackCreate(BaseModel):
     comments: Optional[str] = None
 
 # ##############################
-# Session helpers (Redis)
+# Helper functions
 # ##############################
 
 SESSION_PREFIX = "session:"
@@ -179,12 +181,6 @@ def ensure_mongo_profile(db, user_id: str):
         profiles.insert_one(profile)
     return profile
 
-
-# ##############################
-# HTML pages for login and registration
-# ##############################
-
-# Home page redirects to login if user not logged in. Also alerts when favorite lines have disruptions will be done here to fullfill requirement.
 # Helper to get active alerts for a user
 def get_active_user_alerts(user_id: str):
     alerts = []
@@ -221,7 +217,23 @@ def get_active_user_alerts(user_id: str):
                             })
     return alerts
 
-# If not logged in, redirect to login page. If logged in, show home page with alerts for favorite lines. 
+def calculate_distance(lat1, lon1, lat2, lon2):
+    if None in (lat1, lon1, lat2, lon2):
+        return 0.0
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    # Harversine formula
+    dlon = lon2 - lon1 
+    dlat = lat2 - lat1 
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a)) 
+    r = 6371 # radius of earth in kilometers
+    return c * r
+# ##############################
+# HTML pages for login and registration
+# ##############################
+
+# Home page redirects to login if user not logged in. Also alerts when favorite lines have disruptions will be done here to fullfill requirements
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     token = request.cookies.get("session_token")
@@ -325,6 +337,32 @@ async def register_submit(
     )
     return response
 
+
+@app.get("/logout")
+async def logout(request: Request):
+    token = request.cookies.get("session_token")
+
+    if token:
+        # remove session from Redis.
+        redis_client.delete(SESSION_PREFIX + token)
+        # remove session from Oracle.
+        oracle_sessions.delete_user_session(token)
+
+    response = RedirectResponse(url="/login", status_code=302)
+    response.delete_cookie("session_token")
+    return response
+
+
+# to verify session and get current user info
+@app.get("/me")
+def me(current_user=Depends(get_current_user)):
+    return {
+        "user_id": current_user["user_id"],
+        "email": current_user["email"],
+        "full_name": current_user["full_name"],
+        "role": current_user["role"],
+        "is_active": current_user["is_active"],
+    }
 # ##############################
 # API endpoints
 # ##############################
@@ -367,31 +405,7 @@ def api_login(request: Request, data: LoginRequest):
     return response
 
 
-@app.get("/logout")
-async def logout(request: Request):
-    token = request.cookies.get("session_token")
 
-    if token:
-        # remove session from Redis.
-        redis_client.delete(SESSION_PREFIX + token)
-        # remove session from Oracle.
-        oracle_sessions.delete_user_session(token)
-
-    response = RedirectResponse(url="/login", status_code=302)
-    response.delete_cookie("session_token")
-    return response
-
-
-# to verify session and get current user info
-@app.get("/me")
-def me(current_user=Depends(get_current_user)):
-    return {
-        "user_id": current_user["user_id"],
-        "email": current_user["email"],
-        "full_name": current_user["full_name"],
-        "role": current_user["role"],
-        "is_active": current_user["is_active"],
-    }
 
 # find line in mongodb
 @app.get("/api/lines/{line_id}")
@@ -401,60 +415,55 @@ def line_detail(line_id: str, _=Depends(get_current_user)):
 
     if not doc:
         raise HTTPException(status_code=404, detail="Line not found in MongoDB")
-
     
     doc["_id"] = str(doc["_id"])
 
     return doc
 
 # fallback oracle line detail
-@app.get("/api/oracle/lines/{line_id}") 
-def oracle_line_detail(line_id: str, _=Depends(get_current_user)):
-
+@app.get("/api/oracle/lines/{line_id}")
+def oracle_line_detail(line_id: str, current_user=Depends(get_current_user)):
     with get_engine().begin() as conn:
-        # Fetch the line from Oracle
+        # Fetch line info
         line_row = conn.execute(
-            text(
-                """
-                SELECT
-                    line_id,
-                    code,
-                    name,
-                    line_mode,
-                    active
-                FROM lines
-                WHERE line_id = :line_id
-                """
-            ),
-            {"line_id": line_id},
+            text("SELECT line_id, code, name, line_mode, active FROM lines WHERE line_id = :lid"),
+            {"lid": line_id}
         ).mappings().first()
 
         if not line_row:
-            raise HTTPException(status_code=404, detail="Line not found in Oracle")
+            raise HTTPException(status_code=404, detail="Line not found")
 
-        
+        # Fetch stops
         stops_rows = conn.execute(
-            text(
-                """
-                SELECT
-                    s.stop_id,
-                    s.code       AS stop_code,
-                    s.name       AS stop_name,
-                    s.lat,
-                    s.lon,
-                    st.scheduled_seconds_from_start AS seconds_from_start
+            text("""
+                SELECT s.stop_id, s.code, s.name, st.scheduled_seconds_from_start
                 FROM stop_times st
                 JOIN stops s ON s.stop_id = st.stop_id
-                WHERE st.line_id = :line_id
+                WHERE st.line_id = :lid
                 ORDER BY st.scheduled_seconds_from_start
-                """
-            ),
-            {"line_id": line_id},
+            """),
+            {"lid": line_id}
+        ).mappings().all()
+
+        # Fetch Schedules 
+        schedules_rows = conn.execute(
+            text("""
+                SELECT 
+                    dow, 
+                    TO_CHAR(start_time, 'HH24:MI') as start_str, 
+                    TO_CHAR(end_time, 'HH24:MI') as end_str, 
+                    headway_minutes
+                FROM line_schedules
+                WHERE line_id = :lid
+                ORDER BY dow
+            """),
+            {"lid": line_id}
         ).mappings().all()
 
     return {
         "line": dict(line_row),
         "stops": [dict(r) for r in stops_rows],
+        "schedules": [dict(r) for r in schedules_rows] 
     }
 
 # create trip 
@@ -497,7 +506,7 @@ def create_trip(trip: TripCreate, current_user=Depends(get_current_user),):
                 "created_at": now,
             },
         )
-
+    
     # mongo version
     trips_col = mongo_db["trips"]
     trips_col.insert_one(
@@ -511,6 +520,8 @@ def create_trip(trip: TripCreate, current_user=Depends(get_current_user),):
             "planned_start": trip.planned_start,
             "planned_end": trip.planned_end,
             "created_at": now,
+            "total_distance": trip.total_distance,
+            "distance_unit": trip.distance_unit,
         }
     )
 
@@ -532,6 +543,8 @@ def create_trip(trip: TripCreate, current_user=Depends(get_current_user),):
                             "origin": trip.origin_stop_id,
                             "dest": trip.dest_stop_id,
                             "lines": lines_used,
+                            "dist": trip.total_distance, 
+                            "unit": trip.distance_unit
                         }
                     ],
                     "$slice": -10,  # keep last 10
@@ -545,7 +558,7 @@ def create_trip(trip: TripCreate, current_user=Depends(get_current_user),):
 
 
 @app.get("/api/route")
-def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),):
+def get_route(origin_stop_id: str,dest_stop_id: str,current_user=Depends(get_current_user),):
     driver = get_driver()
     # neo4j shortest path query
     with driver.session() as session:
@@ -582,7 +595,10 @@ def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),
         record = result.single()
 
         if record is None:
-            raise HTTPException(status_code=404,detail="No route found between those stops")
+            raise HTTPException(
+                status_code=404,
+                detail="No route found between those stops"
+            )
 
         path = record["path"]
         nodes = list(path.nodes)
@@ -593,7 +609,7 @@ def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),
     lines_used = []
     stop_ids = set()
 
-    # Process path segments in Neo4j
+    # Build segments from path
     for idx, rel in enumerate(rels):
         from_node = nodes[idx]
         to_node = nodes[idx + 1]
@@ -646,7 +662,7 @@ def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),
             }
         )
 
-    # Import oracle data for lines and stops
+    # Oracle fetch for lines and stops details
     oracle_lines = {}
     oracle_stops = {}
 
@@ -706,11 +722,18 @@ def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),
                     "lon": float(r["lon"]) if r["lon"] is not None else None,
                 }
 
-    # attach lat/lon into segments
+    # Attach coordinates and calculate distances
+    # Fetch User Preference for Units
+    profile = ensure_mongo_profile(mongo_db, current_user["user_id"])
+    units_pref = profile.get("prefs", {}).get("units", "metric") # "metric" or "imperial"
+    
+    total_dist_km = 0.0
+
     for seg in segments:
         fsid = seg["from_stop"]["stop_id"]
         tsid = seg["to_stop"]["stop_id"]
 
+        # Attach coordinates from Oracle 
         if fsid in oracle_stops:
             seg["from_stop"]["lat"] = oracle_stops[fsid]["lat"]
             seg["from_stop"]["lon"] = oracle_stops[fsid]["lon"]
@@ -719,7 +742,26 @@ def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),
             seg["to_stop"]["lat"] = oracle_stops[tsid]["lat"]
             seg["to_stop"]["lon"] = oracle_stops[tsid]["lon"]
 
-    # Import mongo db data for lines
+        # Calculate segment distance
+        flat = seg["from_stop"].get("lat")
+        flon = seg["from_stop"].get("lon")
+        tlat = seg["to_stop"].get("lat")
+        tlon = seg["to_stop"].get("lon")
+        
+        dist = calculate_distance(flat, flon, tlat, tlon)
+        seg["dist_km"] = dist
+        total_dist_km += dist
+
+    # Apply Unit Conversion
+    if units_pref == "imperial":
+        total_distance = total_dist_km * 0.621371
+        unit_label = "mi"
+    else:
+        total_distance = total_dist_km
+        unit_label = "km"
+
+
+    # MongoDB import for line enrichment
     lines_coll = mongo_db["lines"]
 
     mongo_docs = list(
@@ -764,11 +806,15 @@ def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),
         "dest_stop_id": dest_stop_id,
         "total_hops": len(rels),
         "total_travel_s": total_travel_s,
+        
+        
+        "total_distance": round(total_distance, 2),
+        "distance_unit": unit_label,
+        
         "lines_used": lines_used,
         "segments": segments,
         "lines_enriched": lines_enriched,
     }
-
 # Get stops
 @app.get("/api/stops")
 def list_stops(_=Depends(get_current_user)):
@@ -1211,7 +1257,6 @@ async def lines_page(request: Request):
         },
     )
 
-
 @app.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, current_user=Depends(get_current_user)):
     if not current_user:
@@ -1219,7 +1264,7 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
 
     user_id = current_user["user_id"]
 
-    # Build trip history view
+    # Oracle fetch base trip info
     with get_engine().begin() as conn:
         rows = conn.execute(
             text(
@@ -1251,11 +1296,10 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
                 "planned_end": r.planned_end,
                 "origin_name": r.origin_name,
                 "dest_name": r.dest_name,
-                "line_id": r.line_id,  # may be None for older/multi-line trips
+                "line_id": r.line_id,
             }
         )
 
-    # If no trips, just render
     if not trips:
         return templates.TemplateResponse(
             "history.html",
@@ -1266,23 +1310,48 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
             },
         )
 
-    # Get lines used per trip from Mongo
     trip_ids = [t["trip_id"] for t in trips]
-
-    lines_used_by_trip = {}
+    extra_data_by_trip = {}
     mongo_trips = mongo_db["trips"].find(
         {"_id": {"$in": trip_ids}},
-        {"_id": 1, "lines_used": 1},
+        {"_id": 1, "lines_used": 1, "total_distance": 1, "distance_unit": 1},
     )
     for doc in mongo_trips:
-        lines_used_by_trip[doc["_id"]] = doc.get("lines_used", []) or []
+        extra_data_by_trip[doc["_id"]] = doc
 
-    # Gets from Mongo, fall back to Oracle line_id if needed
+    
+    profile = ensure_mongo_profile(mongo_db, user_id)
+    target_pref = profile.get("prefs", {}).get("units", "metric") 
+
+    # Merge data and apply unit conversions (if needed)
     for t in trips:
-        lines = lines_used_by_trip.get(t["trip_id"], [])
+        mongo_doc = extra_data_by_trip.get(t["trip_id"], {})
+        
+        # Lines Logic
+        lines = mongo_doc.get("lines_used", [])
         if not lines and t["line_id"]:
             lines = [t["line_id"]]
         t["lines"] = lines
+
+        # distance conversion logic
+        dist = mongo_doc.get("total_distance", 0.0)
+        stored_unit = mongo_doc.get("distance_unit", "km") 
+
+        
+        
+        # Stored as km, User wants Imperial 
+        if stored_unit == "km" and target_pref == "imperial":
+            dist = dist * 0.621371
+            stored_unit = "mi"
+            
+        # Stored as mi, User wants Metric 
+        elif stored_unit == "mi" and target_pref == "metric":
+            dist = dist * 1.60934
+            stored_unit = "km"
+            
+
+        t["total_distance"] = round(dist, 2)
+        t["distance_unit"] = stored_unit
 
     return templates.TemplateResponse(
         "history.html",
@@ -1292,7 +1361,6 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
             "trips": trips,
         },
     )
-
 
 @app.get("/plan", response_class=HTMLResponse)
 def plan_page(request: Request, current_user=Depends(get_current_user)):

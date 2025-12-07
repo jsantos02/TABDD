@@ -8,7 +8,7 @@
       <th>Lines</th>
       <th>Origin</th>
       <th>Destination</th>
-      <th>Planned start</th>
+      <th>Distance</th> <th>Planned start</th>
       <th>Planned end</th>
     </tr>
   </thead>
@@ -24,6 +24,15 @@
         </td>
         <td>{{ t.origin_name }}</td>
         <td>{{ t.dest_name }}</td>
+        
+        <td>
+            {% if t.total_distance %}
+                {{ t.total_distance }} {{ t.distance_unit }}
+            {% else %}
+                -
+            {% endif %}
+        </td>
+
         <td>{{ t.planned_start }}</td>
         <td>{{ t.planned_end }}</td>
       </tr>

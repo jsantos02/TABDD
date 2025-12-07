@@ -21,7 +21,6 @@
     margin: 0 auto; 
   }
   
-  /* removed stray/empty ruleset (extra "}") that caused the lint warning */
   #alerts-section {
     display: none; 
     background-color: #fff3cd; 
@@ -35,7 +34,7 @@
 
 <div class="dashboard-content">
   <div id="alerts-section" {% if alerts %}style="display:block;"{% else %}style="display:none;"{% endif %}>
-    <h3 style="margin-top: 0;">⚠️ Service Disruptions</h3>
+    <h3 style="margin-top: 0;">Service Disruptions</h3>
     <ul id="alerts-list" style="margin-bottom: 0; padding-left: 20px;">
       {% for alert in alerts %}
         <li style="margin-bottom: 5px;">
@@ -84,7 +83,7 @@
     }
   }
 
-  // Poll every 10 seconds
+  // Poll every 5 seconds
   setInterval(fetchAlerts, 5000);
 </script>
 {% endblock %}

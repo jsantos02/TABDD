@@ -154,16 +154,18 @@ function renderRoute(route) {
   const linesUsed = route.lines_used && route.lines_used.length
     ? route.lines_used.join(', ')
     : 'n/a';
-
-  summaryDiv.textContent =
-    `Total hops: ${route.total_hops} | Total travel ≈ ${minutes.toFixed(1)} min | Lines used: ${linesUsed}`;
-
+  summaryDiv.innerHTML = `
+    <strong>Total hops:</strong> ${route.total_hops} <br>
+    <strong>Travel time:</strong> ≈ ${minutes.toFixed(1)} min <br>
+    <strong>Distance:</strong> ${route.total_distance} ${route.distance_unit} <br>
+    <strong>Lines used:</strong> ${linesUsed}
+  `;
   route.segments.forEach((seg, idx) => {
     const tr = document.createElement('tr');
 
     const fromLabel = `${seg.from_stop.name} (${seg.from_stop.code})`;
     const toLabel = `${seg.to_stop.name} (${seg.to_stop.code})`;
-
+    
     tr.innerHTML = `
       <td>${idx + 1}</td>
       <td>${fromLabel}</td>
@@ -179,7 +181,6 @@ function renderRoute(route) {
 
   table.style.display = '';
 }
-
 async function handleSaveTrip() {
   if (!lastRoute) {
     alert('Compute a route first.');
@@ -215,7 +216,9 @@ async function handleSaveTrip() {
     line_id: lineId,
     planned_start: plannedStartIso,
     planned_end: plannedEndIso,
-    lines_used: lastRoute.lines_used || []
+    lines_used: lastRoute.lines_used || [],
+    total_distance: lastRoute.total_distance || 0,
+    distance_unit: lastRoute.distance_unit || "metric"
   };
 
   const resp = await fetch('/api/trips', {
