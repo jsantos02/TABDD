@@ -18,8 +18,8 @@ from datetime import datetime, timedelta, timezone
 from app.db.oracle import get_engine
 from app.db.redis import redis_client
 from app.config import settings
-from app.repositories import oracle_users, oracle_sessions, oracle_lines, oracle_trips, oracle_ops, mongo_trips, mongo_profiles
-from app.services import routing_service, live_service
+from app.repositories import oracle_users, oracle_sessions, oracle_lines, oracle_trips, oracle_ops, mongo_trips, mongo_profiles, mongo_feedback
+from app.services import routing_service, live_service, alert_service
 from app.db.mongo import mongo_db
 from app.db.neo4j import get_driver
 
@@ -150,7 +150,6 @@ def get_user_id_from_token(token: str | None) -> str | None:
 
 
 async def get_current_user(request: Request):
-    
     auth_header = request.headers.get("Authorization", "")
     token = None
     if auth_header.startswith("Bearer "):
@@ -170,7 +169,6 @@ async def get_current_user(request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     
     if not user["is_active"]:
-        # Optional: actively kill the session here if you want
         redis_client.delete(SESSION_PREFIX + token)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is deactivated")
     
@@ -185,41 +183,6 @@ def get_current_admin(current_user=Depends(get_current_user)):
         )
     return current_user
 
-# Helper to get active alerts for a user
-def get_active_user_alerts(user_id: str):
-    alerts = []
-    profile = mongo_db.user_profiles.find_one({"_id": user_id})
-    
-    if profile and profile.get("prefs", {}).get("notifyDisruptions", True):
-        fav_line_ids = profile.get("favorites", {}).get("lines", [])
-        
-        if fav_line_ids:
-            lines_with_alerts = mongo_db.lines.find({
-                "_id": {"$in": fav_line_ids},
-                "alerts": {"$not": {"$size": 0}} 
-            })
-
-            now = datetime.now(timezone.utc)
-
-            for line in lines_with_alerts:
-                for alert in line.get("alerts", []):
-                    start_dt = alert.get("from")
-                    end_dt = alert.get("to")
-                    
-                    if start_dt and start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(tzinfo=timezone.utc)
-                    if end_dt and end_dt.tzinfo is None:
-                        end_dt = end_dt.replace(tzinfo=timezone.utc)
-
-                    if start_dt and start_dt <= now:
-                        if not end_dt or end_dt > now:
-                            alerts.append({
-                                "line_code": line.get("code"),
-                                "line_name": line.get("name"),
-                                "msg": alert.get("msg"),
-                                "level": "warning"
-                            })
-    return alerts
 
 def set_secure_cookie(response: Response, key: str, value: str):
     response.set_cookie(
@@ -227,7 +190,7 @@ def set_secure_cookie(response: Response, key: str, value: str):
         value=value,
         httponly=True,
         max_age=settings.SESSION_TTL_SECONDS,
-        secure=True, # Enforce HTTPS (might warn on localhost http)
+        secure=True, 
         samesite="lax"
     )
 # ##############################
@@ -245,7 +208,7 @@ def index(request: Request):
         user_id = get_user_id_from_token(token)
         if user_id:
             user = oracle_users.get_user_by_id(user_id)
-            alerts = get_active_user_alerts(user_id)
+            alerts = alert_service.get_active_user_alerts(user_id)
 
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -376,7 +339,7 @@ def me(current_user=Depends(get_current_user)):
 # Show alerts API for current user
 @app.get("/api/alerts")
 def api_alerts(current_user=Depends(get_current_user)):
-    return get_active_user_alerts(current_user["user_id"])
+    return alert_service.get_active_user_alerts(current_user["user_id"])
 
 @app.post("/api/auth/register")
 def api_register(data: RegisterRequest):
@@ -404,13 +367,10 @@ def api_login(request: Request, data: LoginRequest):
     
     token = create_session(user["user_id"], request)
 
-    response = JSONResponse({"access_token": token, "token_type": "bearer"})
-    response.set_cookie(
-        key="session_token",
-        value=token,
-        httponly=True,
-        max_age=settings.SESSION_TTL_SECONDS,
-    )
+    content = {"access_token": token, "token_type": "bearer"}
+    response = JSONResponse(content)
+    
+    set_secure_cookie(response, "session_token", token)
     return response
 
 
@@ -488,7 +448,7 @@ def create_trip(trip: TripCreate, current_user=Depends(get_current_user)):
 
 @app.get("/api/route")
 def get_route(origin_stop_id: str, dest_stop_id: str, current_user=Depends(get_current_user)):
-    user_id = current_user[user_id]
+    user_id = current_user["user_id"]
     profile = mongo_profiles.get_or_create_profile(user_id)
     units = profile.get("prefs", {}).get("units", "metric")
     
@@ -598,7 +558,13 @@ async def feedback_page(request: Request):
     )
 
 @app.post("/feedback", response_class=HTMLResponse)
-async def submit_feedback(request: Request,usability_rating: int = Form(...),satisfaction_rating: int = Form(...),comments: str = Form(""),current_user=Depends(get_current_user), ):
+def submit_feedback(
+    request: Request,
+    usability_rating: int = Form(...),
+    satisfaction_rating: int = Form(...),
+    comments: str = Form(""),
+    current_user=Depends(get_current_user), 
+):
     feedback_data = {
         "user_id": current_user["user_id"], 
         "usability_rating": usability_rating,
@@ -607,8 +573,8 @@ async def submit_feedback(request: Request,usability_rating: int = Form(...),sat
         "submitted_at": datetime.now(timezone.utc),
     }
 
-    # Insert into a new 'feedback' collection in MongoDB
-    mongo_db.feedback.insert_one(feedback_data)
+    
+    mongo_feedback.create_feedback(feedback_data)
 
     return templates.TemplateResponse(
         "feedback.html",
@@ -665,7 +631,7 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
     extra_data_by_trip = {doc["_id"]: doc for doc in mongo_trips_cursor}
 
     # Fetch User Preferences for Unit Conversion
-    user_id = current_user[user_id]
+    user_id = current_user["user_id"]
     profile = mongo_profiles.get_or_create_profile(user_id)
     target_pref = profile.get("prefs", {}).get("units", "metric") 
 

@@ -1,7 +1,7 @@
 import math
 from app.db.neo4j import get_driver
 from app.db.mongo import mongo_db
-from app.repositories import oracle_lines
+from app.repositories import oracle_lines, mongo_lines
 
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     if None in (lat1, lon1, lat2, lon2): return 0.0
@@ -74,7 +74,8 @@ def find_best_route(origin_id: str, dest_id: str, units: str = "metric"):
         total_dist_km += dist
 
     # 5. Enrich with Mongo Data
-    mongo_docs = list(mongo_db.lines.find({"_id": {"$in": list(lines_used)}}))
+    mongo_docs = mongo_lines.get_lines_by_ids(list(lines_used))
+    
     mongo_map = {d["_id"]: d for d in mongo_docs}
     
     lines_enriched = []

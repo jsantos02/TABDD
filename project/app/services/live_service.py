@@ -106,7 +106,7 @@ def calculate_positions(line_id: str):
             "lastKnown": {"ts": now.isoformat(), "loc": loc_obj} if loc_obj else None,
             "departed_stop": meta_map.get(from_stop),
             "next_stop": meta_map.get(to_stop),
-            "eta_next_s": remaining_s,
+            "eta_to_next_stop_s": remaining_s,
             "status": "active" if assign_info else "inactive"
         }
         
