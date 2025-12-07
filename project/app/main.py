@@ -12,9 +12,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 import uuid
-from typing import Optional, List, Dict, Any, Tuple 
+from typing import Optional, List 
 from datetime import datetime, timedelta, timezone
-import math
 
 from app.db.oracle import get_engine
 from app.db.redis import redis_client
