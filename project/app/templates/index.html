@@ -1,13 +1,90 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>Porto Urban Transportation System</h1>
-<p>Welcome, {{ user.full_name }}!</p>
 
-<h2>Important Pages</h2>
-<ul>
-  <li><a href="/lines">Browse lines</a></li>
-  <li><a href="/history">View your travel history</a></li>
-  <li><a href="/profile">Manage your profile page</a></li>
-</ul>
+<style>
+  
+  body {
+    background-image: url("https://mir-s3-cdn-cf.behance.net/project_modules/fs/993dec20315389.562e9e1b9ed30.jpg");
+    background-size: cover;       
+    background-position: center;  
+    background-repeat: no-repeat; 
+    background-attachment: fixed; 
+  }
+
+  .dashboard-content {
+    background-color: rgba(255, 255, 255, 0.9); 
+    padding: 24px;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    max-width: 800px;
+    margin: 0 auto; 
+  }
+  
+  /* removed stray/empty ruleset (extra "}") that caused the lint warning */
+  #alerts-section {
+    display: none; 
+    background-color: #fff3cd; 
+    color: #856404; 
+    padding: 15px; 
+    border-radius: 8px; 
+    border: 1px solid #ffeeba; 
+    margin-bottom: 20px;
+  }
+</style>
+
+<div class="dashboard-content">
+  <div id="alerts-section" {% if alerts %}style="display:block;"{% else %}style="display:none;"{% endif %}>
+    <h3 style="margin-top: 0;">⚠️ Service Disruptions</h3>
+    <ul id="alerts-list" style="margin-bottom: 0; padding-left: 20px;">
+      {% for alert in alerts %}
+        <li style="margin-bottom: 5px;">
+          <strong>Line {{ alert.line_code }}:</strong> {{ alert.msg }}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+  <h1>Porto Transport System</h1>
+  <p>Welcome, {{ user.full_name }}!</p>
+
+  <h2>Quick actions</h2>
+  <ul>
+    <li><a href="/lines">Browse lines</a></li>
+    <li><a href="/history">View your travel history</a></li>
+    <li><a href="/profile">Manage your profile</a></li>
+    <li><a href="/feedback">Give your feedback!</a></li>
+  </ul>
+</div>
+<script>
+  async function fetchAlerts() {
+    try {
+      const response = await fetch('/api/alerts');
+      if (!response.ok) return; // session might be expired
+      
+      const alerts = await response.json();
+      const container = document.getElementById('alerts-section');
+      const list = document.getElementById('alerts-list');
+      
+      if (alerts.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      // Rebuild the list HTML
+      list.innerHTML = alerts.map(alert => `
+        <li style="margin-bottom: 5px;">
+          <strong>Line ${alert.line_code}:</strong> ${alert.msg}
+        </li>
+      `).join('');
+      
+      container.style.display = 'block';
+      
+    } catch (err) {
+      console.error("Failed to fetch alerts", err);
+    }
+  }
+
+  // Poll every 10 seconds
+  setInterval(fetchAlerts, 5000);
+</script>
 {% endblock %}

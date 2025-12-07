@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Feedback{% endblock %}
+
+{% block content %}
+<h1>User Feedback</h1>
+<p>Please evaluate your experience with the Porto Transport App.</p>
+
+{% if msg %}
+  <div style="padding: 10px; background-color: #d4edda; color: #155724; border-radius: 5px; margin-bottom: 15px;">
+    {{ msg }}
+  </div>
+{% endif %}
+
+<form method="post" action="/feedback" style="max-width: 500px;">
+  
+  <div style="margin-bottom: 15px;">
+    <label><strong>Usability Rating (1-5):</strong></label><br>
+    <div style="margin-top: 5px;">
+      <label><input type="radio" name="usability_rating" value="1" required> 1</label>
+      <label><input type="radio" name="usability_rating" value="2"> 2</label>
+      <label><input type="radio" name="usability_rating" value="3"> 3</label>
+      <label><input type="radio" name="usability_rating" value="4"> 4</label>
+      <label><input type="radio" name="usability_rating" value="5"> 5</label>
+    </div>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <label><strong>Overall Satisfaction (1-5):</strong></label><br>
+    <div style="margin-top: 5px;">
+      <label><input type="radio" name="satisfaction_rating" value="1" required> 1</label>
+      <label><input type="radio" name="satisfaction_rating" value="2"> 2</label>
+      <label><input type="radio" name="satisfaction_rating" value="3"> 3</label>
+      <label><input type="radio" name="satisfaction_rating" value="4"> 4</label>
+      <label><input type="radio" name="satisfaction_rating" value="5"> 5</label>
+    </div>
+  </div>
+
+  <div style="margin-bottom: 15px;">
+    <label for="comments"><strong>Comments or Suggestions:</strong></label><br>
+    <textarea name="comments" id="comments" rows="5" style="width: 100%; margin-top: 5px;"></textarea>
+  </div>
+
+  <button type="submit" style="padding: 10px 20px; cursor: pointer;">Submit Feedback</button>
+</form>
+{% endblock %}

@@ -68,6 +68,11 @@ class PrefsPayload(BaseModel):
     notifyDisruptions: bool = True
     units: str = "metric"  # "metric" | "imperial"
 
+class FeedbackCreate(BaseModel):
+    usability_rating: int  
+    satisfaction_rating: int  
+    comments: Optional[str] = None
+
 # ##############################
 # Session helpers (Redis)
 # ##############################
@@ -176,26 +181,66 @@ def ensure_mongo_profile(db, user_id: str):
 
 
 # ##############################
-# HTML pages
+# HTML pages for login and registration
 # ##############################
 
-# Home page redirects to login if user not logged in.
+# Home page redirects to login if user not logged in. Also alerts when favorite lines have disruptions will be done here to fullfill requirement.
+# Helper to get active alerts for a user
+def get_active_user_alerts(user_id: str):
+    alerts = []
+    profile = mongo_db.user_profiles.find_one({"_id": user_id})
+    
+    if profile and profile.get("prefs", {}).get("notifyDisruptions", True):
+        fav_line_ids = profile.get("favorites", {}).get("lines", [])
+        
+        if fav_line_ids:
+            lines_with_alerts = mongo_db.lines.find({
+                "_id": {"$in": fav_line_ids},
+                "alerts": {"$not": {"$size": 0}} 
+            })
+
+            now = datetime.now(timezone.utc)
+
+            for line in lines_with_alerts:
+                for alert in line.get("alerts", []):
+                    start_dt = alert.get("from")
+                    end_dt = alert.get("to")
+                    
+                    if start_dt and start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    if end_dt and end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+
+                    if start_dt and start_dt <= now:
+                        if not end_dt or end_dt > now:
+                            alerts.append({
+                                "line_code": line.get("code"),
+                                "line_name": line.get("name"),
+                                "msg": alert.get("msg"),
+                                "level": "warning"
+                            })
+    return alerts
+
+# If not logged in, redirect to login page. If logged in, show home page with alerts for favorite lines. 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     token = request.cookies.get("session_token")
     user = None
+    alerts = []
 
     if token:
         user_id = get_user_id_from_token(token)
         if user_id:
             user = oracle_users.get_user_by_id(user_id)
+            # Use the helper here
+            alerts = get_active_user_alerts(user_id)
 
     if not user:
         return RedirectResponse(url="/login", status_code=302)
 
     return templates.TemplateResponse(
         "index.html",
-        {"request": request, "user": user},
+        {"request": request, "user": user, "alerts": alerts},
     )
 
 # Login page
@@ -281,8 +326,13 @@ async def register_submit(
     return response
 
 # ##############################
-# JSON auth API (for Postman, etc.)
+# API endpoints
 # ##############################
+
+# Show alerts API for current user
+@app.get("/api/alerts")
+def api_alerts(current_user=Depends(get_current_user)):
+    return get_active_user_alerts(current_user["user_id"])
 
 @app.post("/api/auth/register")
 def api_register(data: RegisterRequest):
@@ -849,7 +899,7 @@ def _oracle_table_has_column(table_name: str, column_name: str) -> bool:
 def _active_assignments_for_line(line_id: str) -> dict:
     has_end = _oracle_table_has_column("DRIVER_ASSIGNMENTS", "END_TS")
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
 
     if has_end:
         sql = text("""
@@ -1091,6 +1141,35 @@ def live_line(line_id: str, _=Depends(get_current_user)):
 # Other HTML endpoints
 # ################################
  
+
+@app.get("/feedback", response_class=HTMLResponse)
+async def feedback_page(request: Request):
+    return templates.TemplateResponse(
+        "feedback.html",
+        {"request": request},
+    )
+
+@app.post("/feedback", response_class=HTMLResponse)
+async def submit_feedback(request: Request,usability_rating: int = Form(...),satisfaction_rating: int = Form(...),comments: str = Form(""),current_user=Depends(get_current_user), ):
+    feedback_data = {
+        "user_id": current_user["user_id"], 
+        "usability_rating": usability_rating,
+        "satisfaction_rating": satisfaction_rating,
+        "comments": comments,
+        "submitted_at": datetime.now(timezone.utc),
+    }
+
+    # Insert into a new 'feedback' collection in MongoDB
+    mongo_db.feedback.insert_one(feedback_data)
+
+    return templates.TemplateResponse(
+        "feedback.html",
+        {
+            "request": request,
+            "msg": "Thank you for your feedback!"
+        },
+    )
+
 @app.get("/lines", response_class=HTMLResponse)
 async def lines_page(request: Request):
 
