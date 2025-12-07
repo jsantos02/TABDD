@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}Admin Dashboard{% endblock %}
+
+{% block content %}
+<h1>Admin Dashboard</h1>
+
+<div style="display: flex; gap: 20px; flex-wrap: wrap;">
+  
+  <div style="flex: 1; min-width: 300px; border: 1px solid #ccc; padding: 15px; border-radius: 8px;">
+    <h2>Create Service Alert</h2>
+    <form id="alert-form" onsubmit="createAlert(event)">
+      <label>Line:</label><br>
+      <select name="line_id" required style="width: 100%; margin-bottom: 10px;">
+        {% for line in lines %}
+          <option value="{{ line.line_id }}">{{ line.code }} - {{ line.name }}</option>
+        {% endfor %}
+      </select>
+      <br>
+      <label>Message:</label><br>
+      <textarea name="msg" required style="width: 100%; margin-bottom: 10px;"></textarea>
+      <br>
+      <label>Duration (minutes):</label><br>
+      <input type="number" name="duration" value="60" style="width: 100%; margin-bottom: 10px;">
+      <br>
+      <button type="submit">Post Alert</button>
+    </form>
+  </div>
+
+  <div style="flex: 1; min-width: 300px; border: 1px solid #ccc; padding: 15px; border-radius: 8px;">
+    <h2>Assign Driver to Vehicle</h2>
+    <form id="assign-form" onsubmit="createAssignment(event)">
+      <label>Line:</label><br>
+      <select name="line_id" required style="width: 100%; margin-bottom: 10px;">
+        {% for line in lines %}
+          <option value="{{ line.line_id }}">{{ line.code }} - {{ line.name }}</option>
+        {% endfor %}
+      </select>
+      <br>
+      <label>Driver:</label><br>
+      <select name="driver_id" required style="width: 100%; margin-bottom: 10px;">
+        {% for d in drivers %}
+          <option value="{{ d.driver_id }}">{{ d.driver_id }} ({{ d.license_no }})</option>
+        {% endfor %}
+      </select>
+      <br>
+      <label>Vehicle:</label><br>
+      <select name="vehicle_id" required style="width: 100%; margin-bottom: 10px;">
+        {% for v in vehicles %}
+          <option value="{{ v.vehicle_id }}">{{ v.plate }} - {{ v.model }}</option>
+        {% endfor %}
+      </select>
+      <br>
+      <button type="submit">Create Assignment</button>
+    </form>
+  </div>
+
+</div>
+
+<hr>
+
+<h2>User Management</h2>
+<table border="1" cellpadding="5" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+  <thead>
+    <tr style="background-color: #f2f2f2;">
+      <th>Name</th>
+      <th>Email</th>
+      <th>Role</th>
+      <th>Status</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for u in users %}
+    <tr>
+      <td>{{ u.full_name }}</td>
+      <td>{{ u.email }}</td>
+      <td>{{ u.role }}</td>
+      <td id="status-{{ u.user_id }}">
+        {% if u.is_active %}
+          <span style="color: green; font-weight: bold;">Active</span>
+        {% else %}
+          <span style="color: red; font-weight: bold;">Banned</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if u.role != 'admin' %}
+          <button onclick="toggleUser('{{ u.user_id }}', '{{ u.is_active }}')">
+            {% if u.is_active %}Ban{% else %}Activate{% endif %}
+          </button>
+        {% else %}
+          (Admin)
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<script>
+async function createAlert(ev) {
+  ev.preventDefault();
+  const formData = new FormData(ev.target);
+  const payload = {
+    line_id: formData.get("line_id"),
+    msg: formData.get("msg"),
+    duration_minutes: parseInt(formData.get("duration"))
+  };
+
+  const res = await fetch("/api/admin/alerts", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  });
+
+  if(res.ok) {
+    alert("Alert created!");
+    ev.target.reset();
+  } else {
+    alert("Error creating alert");
+  }
+}
+
+async function createAssignment(ev) {
+  ev.preventDefault();
+  const formData = new FormData(ev.target);
+  const payload = {
+    line_id: formData.get("line_id"),
+    driver_id: formData.get("driver_id"),
+    vehicle_id: formData.get("vehicle_id")
+  };
+
+  const res = await fetch("/api/admin/assignments", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  });
+
+  if(res.ok) {
+    alert("Assignment created! Check Live view.");
+    ev.target.reset();
+  } else {
+    alert("Error creating assignment");
+  }
+}
+
+async function toggleUser(userId, currentStatusRaw) {
+  //Determine current active status safely. Oracle returns 1 (active) or 0 (inactive). 
+  const isActive = (
+      currentStatusRaw == 1 || 
+      currentStatusRaw == '1' || 
+      currentStatusRaw == 'True' || 
+      currentStatusRaw == 'true'
+  );
+
+  // Flip the status
+  const newStatus = !isActive;
+
+  // Send request
+  const res = await fetch(`/api/admin/users/${userId}/status`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ is_active: newStatus })
+  });
+
+  if(res.ok) {
+    location.reload();
+  } else {
+    alert("Failed to update user status");
+  }
+}
+</script>
+
+{% endblock %}

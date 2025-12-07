@@ -24,6 +24,9 @@
   <a href="/plan">Plan a trip</a>
   <a href="/live">Live</a>
   <a href="/feedback">Feedback</a>
+  {% if user and user.role == 'admin' %}
+    <a href="/admin" style="color: #ffcc00; font-weight: bold;">Admin Dashboard</a>
+  {% endif %}
   <a href="/logout" style="float:right;">Logout</a></header>
 <main>
   {% block content %}{% endblock %}

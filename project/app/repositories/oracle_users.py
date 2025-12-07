@@ -61,3 +61,24 @@ def create_user(email: str, password: str, full_name: str, role: str = "passenge
             },
         )
     return user_id
+
+def get_all_users():
+    """Fetches all users for the admin dashboard."""
+    sql = text("""
+        SELECT user_id, email, full_name, role, is_active, created_at
+        FROM users
+        ORDER BY created_at DESC
+    """)
+    with get_engine().begin() as conn:
+        rows = conn.execute(sql).mappings().all()
+        return [dict(row) for row in rows]
+
+def update_user_status(user_id: str, is_active: bool):
+    """Toggles the is_active status of a user."""
+    sql = text("""
+        UPDATE users
+        SET is_active = :is_active
+        WHERE user_id = :user_id
+    """)
+    with get_engine().begin() as conn:
+        conn.execute(sql, {"is_active": 1 if is_active else 0, "user_id": user_id})

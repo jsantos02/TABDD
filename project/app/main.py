@@ -68,12 +68,25 @@ class StopFavoritePayload(BaseModel):
 
 class PrefsPayload(BaseModel):
     notifyDisruptions: bool = True
-    units: str = "metric"  # "metric" | "imperial"
+    units: str = "metric"  # default to metric
 
 class FeedbackCreate(BaseModel):
     usability_rating: int  
     satisfaction_rating: int  
     comments: Optional[str] = None
+
+class AdminAlertCreate(BaseModel):
+    line_id: str
+    msg: str
+    duration_minutes: int = 60
+
+class DriverAssignmentCreate(BaseModel):
+    driver_id: str
+    vehicle_id: str
+    line_id: str
+
+class UserStatusUpdate(BaseModel):
+    is_active: bool
 
 # ##############################
 # Helper functions
@@ -158,8 +171,23 @@ async def get_current_user(request: Request):
     user = oracle_users.get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-
+    
+    if not user["is_active"]:
+        # Optional: actively kill the session here if you want
+        redis_client.delete(SESSION_PREFIX + token)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is deactivated")
+    
     return user
+
+
+def get_current_admin(current_user=Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Insufficient permissions"
+        )
+    return current_user
+
 
 # Create user profile in MongoDB if not exists
 def ensure_mongo_profile(db, user_id: str):
@@ -270,16 +298,20 @@ async def login_submit(
     email: str = Form(...),
     password: str = Form(...),
 ):
-    """
-    Handles the HTML login form (login.html).
-    """
     user = oracle_users.get_user_by_email(email)
     if not user or not oracle_users.verify_password(password, user["password_hash"]):
-        # Re-render login page with error
         return templates.TemplateResponse(
             "login.html",
             {"request": request, "error": "Invalid credentials"},
             status_code=400,
+        )
+
+    # NEW: Check if user is banned
+    if not user["is_active"]:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Account is deactivated"},
+            status_code=403,
         )
 
     token = create_session(user["user_id"], request)
@@ -392,7 +424,10 @@ def api_login(request: Request, data: LoginRequest):
     user = oracle_users.get_user_by_email(data.email)
     if not user or not oracle_users.verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Invalid credentials")
-
+    
+    if not user["is_active"]:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+    
     token = create_session(user["user_id"], request)
 
     response = JSONResponse({"access_token": token, "token_type": "bearer"})
@@ -919,6 +954,61 @@ def set_prefs(payload: PrefsPayload,current_user=Depends(get_current_user),):
     return {"ok": True}
 
 
+# ##############################
+# Admin API Endpoints
+# ##############################
+
+@app.post("/api/admin/alerts")
+def create_alert(payload: AdminAlertCreate, _=Depends(get_current_admin)):
+    now = datetime.now(timezone.utc)
+    end_time = now + timedelta(minutes=payload.duration_minutes)
+    
+    new_alert = {
+        "msg": payload.msg,
+        "from": now,
+        "to": end_time
+    }
+    
+    # Update MongoDB
+    result = mongo_db.lines.update_one(
+        {"_id": payload.line_id},
+        {"$push": {"alerts": new_alert}}
+    )
+    
+    if result.modified_count == 0:
+        result = mongo_db.lines.update_one(
+            {"line_id": payload.line_id},
+            {"$push": {"alerts": new_alert}}
+        )
+
+    return {"ok": True, "modified": result.modified_count}
+
+@app.post("/api/admin/users/{user_id}/status")
+def toggle_user_status(user_id: str, payload: UserStatusUpdate, _=Depends(get_current_admin)):
+    oracle_users.update_user_status(user_id, payload.is_active)
+    return {"ok": True}
+
+@app.post("/api/admin/assignments")
+def create_assignment(payload: DriverAssignmentCreate, _=Depends(get_current_admin)):
+    assignment_id = "ASG_" + str(uuid.uuid4())[:8]
+    
+    with get_engine().begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO driver_assignments (
+                    assignment_id, driver_id, vehicle_id, line_id, start_ts
+                ) VALUES (
+                    :aid, :did, :vid, :lid, SYSTIMESTAMP
+                )
+            """),
+            {
+                "aid": assignment_id,
+                "did": payload.driver_id,
+                "vid": payload.vehicle_id,
+                "lid": payload.line_id
+            }
+        )
+    return {"ok": True, "assignment_id": assignment_id}
 # ######################
 # Live vehicles (Mongo)
 # ######################
@@ -1187,7 +1277,29 @@ def live_line(line_id: str, _=Depends(get_current_user)):
 # Other HTML endpoints
 # ################################
  
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard(request: Request, current_user=Depends(get_current_admin)):
+    
+    # Fetch Users
+    users = oracle_users.get_all_users()
+    
+    # Fetch Lists for Dropdowns (Lines, Drivers, Vehicles)
+    with get_engine().connect() as conn:
+        lines = conn.execute(text("SELECT line_id, code, name FROM lines WHERE active=1 ORDER BY code")).mappings().all()
+        drivers = conn.execute(text("SELECT driver_id, license_no FROM drivers ORDER BY driver_id")).mappings().all()
+        vehicles = conn.execute(text("SELECT vehicle_id, plate, model FROM vehicles WHERE active=1 ORDER BY plate")).mappings().all()
 
+    return templates.TemplateResponse(
+        "admin_dashboard.html",
+        {
+            "request": request,
+            "user": current_user,
+            "users": users,
+            "lines": lines,
+            "drivers": drivers,
+            "vehicles": vehicles
+        },
+    )
 @app.get("/feedback", response_class=HTMLResponse)
 async def feedback_page(request: Request):
     return templates.TemplateResponse(
