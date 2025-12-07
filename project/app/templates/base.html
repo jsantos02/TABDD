@@ -33,3 +33,22 @@
 </main>
 </body>
 </html>
+<script>
+  // 1 hour in milliseconds
+  const INACTIVITY_LIMIT = 3600 * 1000; 
+  let timeout;
+
+  function resetTimer() {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => {
+      alert("Session expired due to inactivity.");
+      window.location.href = "/logout";
+    }, INACTIVITY_LIMIT);
+  }
+
+  // Listen for activity
+  window.onload = resetTimer;
+  document.onmousemove = resetTimer;
+  document.onkeypress = resetTimer;
+  document.onclick = resetTimer;
+</script>
