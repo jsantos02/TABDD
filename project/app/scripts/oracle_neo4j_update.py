@@ -7,9 +7,9 @@ from sqlalchemy import text
 from app.db.oracle import get_engine
 from app.db.neo4j import get_driver
 
-
+# Load data from Oracle
 def load_from_oracle():
-    """Load lines, stops and stop_times from Oracle as dicts."""
+    
     engine = get_engine()
     with engine.begin() as conn:
         # active lines
@@ -46,27 +46,22 @@ def load_from_oracle():
 
     return lines, stops, stop_times
 
-
+# Build segments for NEXT relationships in Neo4j
 def build_segments(stop_times):
-    """
-    From ordered stop_times, build NEXT segments:
-    (from_stop_id, to_stop_id, seq, avg_travel_s) per line.
-    """
     by_line = defaultdict(list)
     for row in stop_times:
         by_line[row["line_id"]].append(row)
 
     segments = []
 
+    # sort by scheduled_seconds_from_start to build segments
     for line_id, lst in by_line.items():
-        # already ordered by scheduled_seconds_from_start in SQL,
-        # but sort again just to be safe
         lst_sorted = sorted(lst, key=lambda r: r["scheduled_seconds_from_start"])
         for idx in range(len(lst_sorted) - 1):
             current = lst_sorted[idx]
             nxt = lst_sorted[idx + 1]
             delta = nxt["scheduled_seconds_from_start"] - current["scheduled_seconds_from_start"]
-            # fallback: if something weird, use at least 60s
+            # fallback if something happens, use at least 60s
             avg_travel_s = int(delta) if delta and delta > 0 else 60
 
             segments.append(
@@ -87,10 +82,10 @@ def sync_to_neo4j(lines, stops, segments):
     driver = get_driver()
 
     with driver.session() as session:
-        # 1) (optional) wipe existing graph (careful if you reuse DB)
+        # Cleanup existing data
         session.run("MATCH (n) DETACH DELETE n")
 
-        # 2) Constraints / indexes (as in your Part I report)
+        # Constraints / indexes 
         session.run(
             """
             CREATE CONSTRAINT stop_id_unique IF NOT EXISTS
@@ -110,7 +105,7 @@ def sync_to_neo4j(lines, stops, segments):
             """
         )
 
-        # 3) Load Stops
+        # Load Stops
         session.run(
             """
             UNWIND $stops AS s
@@ -134,7 +129,7 @@ def sync_to_neo4j(lines, stops, segments):
             ],
         )
 
-        # 4) Load Lines
+        # Load Lines
         session.run(
             """
             UNWIND $lines AS l
@@ -156,7 +151,7 @@ def sync_to_neo4j(lines, stops, segments):
             ],
         )
 
-        # 5) NEXT + SERVES relationships
+        # NEXT + SERVES relationships
         session.run(
             """
             UNWIND $segments AS seg
@@ -174,21 +169,23 @@ def sync_to_neo4j(lines, stops, segments):
         )
 
     
-        # 6) NEW: TRANSFER edges between nearby/identical stops
+        # TRANSFER edges between nearby/identical stops
         transfer_pairs = [
-            # Metro ↔ Bus at Aliados
+            # Metro <-> Bus at Aliados
             {"from_id": "M_STOP_ALIADOS",      "to_id": "B_STOP_ALIADOS",      "walk_s": 180},
-            # Metro ↔ Bus at São Bento
+            # Metro <-> Bus at São Bento
             {"from_id": "M_STOP_SAO_BENTO",    "to_id": "B_STOP_SAO_BENTO",    "walk_s": 180},
-            # Metro ↔ Bus at Jardim do Morro
+            # Metro <-> Bus at Jardim do Morro
             {"from_id": "M_STOP_JARDIM_MORRO", "to_id": "B_STOP_JARDIM_MORRO", "walk_s": 180},
-            # Metro ↔ Bus at Santo Ovídio
+            # Metro <-> Bus at Santo Ovídio
             {"from_id": "M_STOP_SANTO_OVIDIO", "to_id": "B_STOP_SANTO_OVIDIO", "walk_s": 180},
-            # Hospital / University area
+            # Metro <-> Bus at Hospital S. João
             {"from_id": "M_STOP_HOSP_S_JOAO",  "to_id": "B_STOP_HOSP_S_JOAO",  "walk_s": 180},
+            # Metro <-> Bus at Polo Universitário
             {"from_id": "M_STOP_POLO_UNIV",    "to_id": "B_STOP_POLO_UNIV",    "walk_s": 180},
+            # Metro <-> Bus at Marquês
             {"from_id": "M_STOP_MARQUES",      "to_id": "B_STOP_MARQUES",      "walk_s": 120},
-            # Central hub at Trindade
+            # Metro <-> Bus at Trindade
             {"from_id": "M_STOP_TRINDADE",     "to_id": "B_STOP_TRINDADE",     "walk_s": 120},
         ]
 
@@ -207,10 +204,6 @@ def sync_to_neo4j(lines, stops, segments):
             """,
             pairs=transfer_pairs,
         )
-
-        # (Optional) You can later add TRANSFER edges here, based on
-        # shared locations / manual mapping between nearby stops.
-        # For now, NEXT+SERVES is enough to power shortest-path routing.
 
 
 def main():

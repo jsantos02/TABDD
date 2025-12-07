@@ -8,7 +8,5 @@ _driver = GraphDatabase.driver(
     auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
 )
 
-
 def get_driver():
-    """Return the shared Neo4j driver."""
     return _driver

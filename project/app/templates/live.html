@@ -88,7 +88,7 @@
   function initMap() {
     if (map) return;
 
-    // Default center: Porto-ish, but we’ll adjust once we have data.
+    // Default center: Porto
     map = L.map("map");
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
@@ -198,19 +198,19 @@ function getEtaSec(vehicle) {
 }
 
 function getStatusText(v) {
-  // Prefer explicit status string if API provides it
+
   const statusStr = pick(v, ["status"], null);
   if (typeof statusStr === "string" && statusStr.trim()) return statusStr;
 
   // Your previous "active" boolean
-  if (v.active === true) return "✅ Active";
-  if (v.active === false) return "⛔ Inactive";
+  if (v.active === true) return "Active";
+  if (v.active === false) return "Inactive";
 
   // Assignment-related hints if your API includes them
   const hasAssignment =
     !!pick(v, ["assignment_id", "assignmentId", "driver_id", "driverId"], null);
 
-  if (hasAssignment) return "🧑‍✈️ Assigned";
+  if (hasAssignment) return "Assigned";
 
   // If we have coordinates, it’s at least "running-ish"
   const coords = getCoords(v);

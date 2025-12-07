@@ -3,6 +3,7 @@ import os
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    # matches ISEP docker config
     ORACLE_USER: str = "system"
     ORACLE_PASSWORD: str = "oracle"
     ORACLE_HOST: str = "vsgate-s1.dei.isep.ipp.pt"
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
             f"/?service_name={self.ORACLE_SERVICE}"
         )
     
+    # matches docker: redis-local on port 6379
     REDIS_URL: str = "redis://localhost:6379/0"
     SESSION_TTL_SECONDS: int = 3600 # 1 hour session TTL
 

@@ -5,13 +5,13 @@ from typing import List, Dict, Optional
 
 from sqlalchemy import text
 from app.db.oracle import get_engine
-from app.db.mongo import mongo_db   # your existing mongo_db from mongo.py
+from app.db.mongo import mongo_db  
 
 
 def _new_id() -> str:
     return str(uuid.uuid4())
 
-
+# Create a new trip in Oracle DB
 def create_trip_oracle(
     user_id: Optional[str],
     line_id: Optional[str],
@@ -21,10 +21,7 @@ def create_trip_oracle(
     planned_end: Optional[datetime],
     stops_sequence: Optional[List[Dict]] = None,
 ) -> str:
-    """
-    Insert into Oracle trips (+ trip_stops if provided) and return trip_id.
-    stops_sequence: list of { "stop_id": ..., "eta": datetime | None, "ata": datetime | None }
-    """
+
     trip_id = _new_id()
 
     with get_engine().begin() as conn:
@@ -72,7 +69,7 @@ def create_trip_oracle(
 
     return trip_id
 
-
+# add same trip info to MongoDB
 def mirror_trip_to_mongo(
     trip_id: str,
     user_id: Optional[str],
@@ -82,17 +79,12 @@ def mirror_trip_to_mongo(
     planned_start: datetime,
     planned_end: Optional[datetime],
 ):
-    """
-    Mirror trip metadata into MongoDB:
-      - trips collection
-      - user_profiles.recentTrips
-    """
-    now = datetime.utcnow()
+    now = datetime.now()
 
     trips_coll = mongo_db["trips"]
     profiles_coll = mongo_db["user_profiles"]
 
-    # 1) Insert / upsert into trips collection
+    # Insert into trips collection
     trips_coll.replace_one(
         {"_id": trip_id},
         {
@@ -108,7 +100,7 @@ def mirror_trip_to_mongo(
         upsert=True,
     )
 
-    # 2) Update user's recentTrips (document schema from your Part I)
+    # Update user's recentTrips
     if user_id:
         profiles_coll.update_one(
             {"_id": user_id},
@@ -142,11 +134,7 @@ def create_trip_polyglot(
     planned_end: Optional[datetime],
     stops_sequence: Optional[List[Dict]] = None,
 ) -> str:
-    """
-    High-level helper:
-      1) write into Oracle (trips + trip_stops)
-      2) mirror into Mongo (trips + user_profiles.recentTrips)
-    """
+
     trip_id = create_trip_oracle(
         user_id=user_id,
         line_id=line_id,

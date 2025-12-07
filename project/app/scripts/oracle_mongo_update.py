@@ -6,12 +6,11 @@ from sqlalchemy import text
 from app.db.oracle import get_engine
 from app.db.mongo import mongo_db
 
-
+# Load data from Oracle
 def load_from_oracle():
     engine = get_engine()
 
     with engine.begin() as conn:
-        # ✅ use line_mode in Oracle, alias to "mode" for Python
         lines = conn.execute(
             text(
                 """
@@ -56,24 +55,15 @@ def load_from_oracle():
 
     return lines, stops, stop_times
 
+# Sync stops into MongoDB
 def sync_stops(stops, stop_times):
-    """
-    Create / update Mongo 'stops' collection:
-      {
-        _id: stop_id,
-        code: string,
-        name: string,
-        location: { type: "Point", coordinates: [lon, lat] },
-        amenities: []
-      }
-    """
     stops_coll = mongo_db.stops
 
-    # Prefer the canonical stops table, but fall back to joined rows if needed.
+    # Prefers stops table, but falls back to joined rows if necessary.
     if stops:
         iterable = stops
     else:
-        # if for some reason you only have stop_times+joined stops
+        # fall back to unique stops from stop_times
         iterable = {
             (st["stop_id"], st["stop_code"], st["stop_name"], st["lat"], st["lon"])
             for st in stop_times
@@ -106,24 +96,11 @@ def sync_stops(stops, stop_times):
 
         stops_coll.replace_one({"_id": s["stop_id"]}, doc, upsert=True)
 
-
+# Sync lines into MongoDB
 def sync_lines(lines, stop_times):
-    """
-    Create / update Mongo 'lines' collection to match your Part I spec:
-      {
-        _id: line_id,
-        code: string,
-        name: string,
-        line_mode: "bus" | "tram" | "metro",
-        itinerary: [
-          { stop_id, seq, avgStopSec }
-        ],
-        alerts: []
-      }
-    """
     lines_coll = mongo_db.lines
 
-    # Group stop_times per line
+    
     grouped = defaultdict(list)
     for st in stop_times:
         grouped[st["line_id"]].append(st)
@@ -131,7 +108,7 @@ def sync_lines(lines, stop_times):
     for line in lines:
         line_id = line["line_id"]
 
-        # sort again just in case
+        # sort again for safety
         stops_for_line = sorted(
             grouped.get(line_id, []),
             key=lambda r: r["scheduled_seconds_from_start"],

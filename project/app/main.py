@@ -8,19 +8,18 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 import uuid
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Tuple 
 from app.db.oracle import get_engine
 from app.db.redis import redis_client
 from app.config import settings
 from app.repositories import oracle_users, oracle_sessions
 from datetime import datetime, timedelta, timezone
-from app.db.mongo import mongo_db, mongo_client
+from app.db.mongo import mongo_db
 from app.db.neo4j import get_driver
-from app.services.travel_history import create_trip_polyglot
+import math
 
 
 
@@ -28,9 +27,9 @@ app = FastAPI(title="Porto Transport App")
 templates = Jinja2Templates(directory="app/templates")
 
 
-# ---------------------------
+# ##############################
 # Pydantic models for JSON APIs
-# ---------------------------
+# ##############################
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -68,19 +67,16 @@ class StopFavoritePayload(BaseModel):
 class PrefsPayload(BaseModel):
     notifyDisruptions: bool = True
     units: str = "metric"  # "metric" | "imperial"
-# ---------------------------
+
+# ##############################
 # Session helpers (Redis)
-# ---------------------------
+# ##############################
 
 SESSION_PREFIX = "session:"
 
 
 def create_session(user_id: str, request: Request) -> str:
-    """
-    Create a session:
-    - Insert row into Oracle user_sessions (for history / auditing)
-    - Store token->user_id in Redis for fast runtime auth
-    """
+
     token = str(uuid.uuid4())
     now = datetime.utcnow()
     expires_at = now + timedelta(seconds=settings.SESSION_TTL_SECONDS)
@@ -88,7 +84,7 @@ def create_session(user_id: str, request: Request) -> str:
     user_agent = request.headers.get("user-agent")
     ip = request.client.host if request.client else None
 
-    # 1) Persist in Oracle
+    # Persists the session in Oracle DB
     oracle_sessions.create_user_session(
         session_id=token,
         user_id=user_id,
@@ -98,7 +94,7 @@ def create_session(user_id: str, request: Request) -> str:
         ip=ip,
     )
 
-    # 2) Store active session in Redis (fast lookup)
+    # Persists the session in Redis cache
     redis_client.setex(
         SESSION_PREFIX + token,
         settings.SESSION_TTL_SECONDS,
@@ -108,27 +104,25 @@ def create_session(user_id: str, request: Request) -> str:
     return token
 
 
-
-
 def get_user_id_from_token(token: str | None) -> str | None:
     if not token:
         return None
 
-    # 1) Fast path: Redis
+    # Returns user_id if valid session
     user_id = redis_client.get(SESSION_PREFIX + token)
     if user_id:
         return user_id
 
-    # 2) Fallback: Oracle user_sessions (in case Redis lost the key)
+    # Returns None if not in Redis - check Oracle
     session = oracle_sessions.get_active_session(token)
     if not session:
-        return None  # no such session or already expired in Oracle
+        return None  # no session in Oracle either
 
     user_id = session["user_id"]
 
-    # 3) Re-hydrate Redis with remaining TTL (optional but nice)
+   
     expires_at = session["expires_at"]
-    # expires_at is a datetime from Oracle; use UTC-ish delta
+    # Expires the session in 1 hour. (in the future it would be nice to have it not expire if active)
     now = datetime.now(datetime.timezone.utc)
     ttl_seconds = int((expires_at - now).total_seconds())
 
@@ -139,13 +133,12 @@ def get_user_id_from_token(token: str | None) -> str | None:
 
 
 async def get_current_user(request: Request):
-    # 1) Authorization: Bearer <token>
+    
     auth_header = request.headers.get("Authorization", "")
     token = None
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
     else:
-        # 2) session_token cookie
         token = request.cookies.get("session_token")
 
     if not token:
@@ -161,7 +154,7 @@ async def get_current_user(request: Request):
 
     return user
 
-
+# Create user profile in MongoDB if not exists
 def ensure_mongo_profile(db, user_id: str):
     profiles = db.user_profiles
     profile = profiles.find_one({"_id": user_id})
@@ -182,17 +175,13 @@ def ensure_mongo_profile(db, user_id: str):
     return profile
 
 
-# ---------------------------
+# ##############################
 # HTML pages
-# ---------------------------
+# ##############################
 
+# Home page redirects to login if user not logged in.
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    """
-    Home page:
-    - If user has a valid session cookie -> render index.html
-    - Otherwise -> redirect to /login
-    """
     token = request.cookies.get("session_token")
     user = None
 
@@ -209,7 +198,7 @@ async def index(request: Request):
         {"request": request, "user": user},
     )
 
-
+# Login page
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     return templates.TemplateResponse(
@@ -217,7 +206,7 @@ async def login_page(request: Request):
         {"request": request, "error": None},
     )
 
-
+# Login form submission
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(
     request: Request,
@@ -248,8 +237,7 @@ async def login_submit(
     return response
 
 
-# ---------- NEW: HTML Register page ----------
-
+# Register page
 @app.get("/register", response_class=HTMLResponse)
 async def register_page(request: Request):
     return templates.TemplateResponse(
@@ -257,7 +245,7 @@ async def register_page(request: Request):
         {"request": request, "error": None},
     )
 
-
+# Register submission
 @app.post("/register", response_class=HTMLResponse)
 async def register_submit(
     request: Request,
@@ -265,10 +253,7 @@ async def register_submit(
     email: str = Form(...),
     password: str = Form(...),
 ):
-    """
-    Handles the HTML register form (register.html).
-    Creates user in Oracle and logs them in (creates Redis session).
-    """
+    # Check if user already exists, if not add it to oracle.
     existing = oracle_users.get_user_by_email(email)
     if existing:
         return templates.TemplateResponse(
@@ -283,7 +268,7 @@ async def register_submit(
         full_name=full_name,
     )
 
-    # auto-login: create session and redirect to home
+    # create session and redirect to home after registering
     token = create_session(user_id, request)
 
     response = RedirectResponse(url="/", status_code=302)
@@ -295,9 +280,9 @@ async def register_submit(
     )
     return response
 
-# ---------------------------
+# ##############################
 # JSON auth API (for Postman, etc.)
-# ---------------------------
+# ##############################
 
 @app.post("/api/auth/register")
 def api_register(data: RegisterRequest):
@@ -337,27 +322,19 @@ async def logout(request: Request):
     token = request.cookies.get("session_token")
 
     if token:
-        # 1) remove from Redis
+        # remove session from Redis.
         redis_client.delete(SESSION_PREFIX + token)
-
-        # 2) remove from Oracle (hard delete)
-        deleted = oracle_sessions.delete_user_session(token)
-        # if you want to debug, you can temporarily print:
-        # print(f"Deleted {deleted} session rows for {token}")
-
-        # (If you prefer soft delete, use expire_user_session(token) instead.)
+        # remove session from Oracle.
+        oracle_sessions.delete_user_session(token)
 
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie("session_token")
     return response
 
 
-
+# to verify session and get current user info
 @app.get("/me")
 def me(current_user=Depends(get_current_user)):
-    """
-    Protected endpoint to confirm the session is working.
-    """
     return {
         "user_id": current_user["user_id"],
         "email": current_user["email"],
@@ -366,42 +343,26 @@ def me(current_user=Depends(get_current_user)):
         "is_active": current_user["is_active"],
     }
 
-
+# find line in mongodb
 @app.get("/api/lines/{line_id}")
-def line_detail(line_id: str, current_user=Depends(get_current_user)):
-    """
-    Return Mongo-only line document.
+def line_detail(line_id: str, _=Depends(get_current_user)):
 
-    Example doc:
-    {
-      "_id": "LINE_M_A",
-      "code": "A",
-      "name": "...",
-      "mode": "metro",
-      "itinerary": [...],
-      "alerts": [...]
-    }
-    """
     doc = mongo_db.lines.find_one({"_id": line_id})
 
     if not doc:
         raise HTTPException(status_code=404, detail="Line not found in MongoDB")
 
-    # Optional: convert _id to plain string (it already is, but this is safe)
+    
     doc["_id"] = str(doc["_id"])
 
     return doc
 
+# fallback oracle line detail
+@app.get("/api/oracle/lines/{line_id}") 
+def oracle_line_detail(line_id: str, _=Depends(get_current_user)):
 
-@app.get("/api/oracle/lines/{line_id}") # oracle only
-def oracle_line_detail(line_id: str, current_user=Depends(get_current_user)):
-    """
-    Oracle-only view of a line:
-    - line row from Oracle 'lines' table
-    - ordered itinerary from 'stop_times' + 'stops'
-    """
     with get_engine().begin() as conn:
-        # 1) Fetch the line from Oracle
+        # Fetch the line from Oracle
         line_row = conn.execute(
             text(
                 """
@@ -421,7 +382,7 @@ def oracle_line_detail(line_id: str, current_user=Depends(get_current_user)):
         if not line_row:
             raise HTTPException(status_code=404, detail="Line not found in Oracle")
 
-        # 2) Fetch ordered stops for this line
+        
         stops_rows = conn.execute(
             text(
                 """
@@ -446,12 +407,9 @@ def oracle_line_detail(line_id: str, current_user=Depends(get_current_user)):
         "stops": [dict(r) for r in stops_rows],
     }
 
-
+# create trip 
 @app.post("/api/trips")
-def create_trip(
-    trip: TripCreate,
-    current_user=Depends(get_current_user),
-):
+def create_trip(trip: TripCreate, current_user=Depends(get_current_user),):
     user_id = current_user["user_id"]
     now = datetime.now(timezone.utc)
     trip_id = str(uuid.uuid4())
@@ -464,7 +422,7 @@ def create_trip(
     else:
         lines_used = []
 
-    # ----- ORACLE: base trip row -----
+    # oracle version
     with get_engine().begin() as conn:
         conn.execute(
             text("""
@@ -490,7 +448,7 @@ def create_trip(
             },
         )
 
-    # ----- MONGO: richer trip document -----
+    # mongo version
     trips_col = mongo_db["trips"]
     trips_col.insert_one(
         {
@@ -506,14 +464,14 @@ def create_trip(
         }
     )
 
-    # ----- MONGO: user_profiles.recentTrips (NO recentTrips in $setOnInsert!) -----
+    # update user profile recentTrips
     profiles = mongo_db["user_profiles"]
     profiles.update_one(
         {"_id": user_id},
         {
             "$setOnInsert": {
                 "favorites": {"lines": [], "stops": []},
-                "prefs": {},   # whatever default prefs you want
+                "prefs": {},   
             },
             "$push": {
                 "recentTrips": {
@@ -537,14 +495,9 @@ def create_trip(
 
 
 @app.get("/api/route")
-def get_route(
-    origin_stop_id: str,
-    dest_stop_id: str,
-    current_user=Depends(get_current_user),
-):
+def get_route(origin_stop_id: str,dest_stop_id: str,_=Depends(get_current_user),):
     driver = get_driver()
-
-    # --- 1) Neo4j shortest path (undirected) ---
+    # neo4j shortest path query
     with driver.session() as session:
         result = session.run(
             """
@@ -579,10 +532,7 @@ def get_route(
         record = result.single()
 
         if record is None:
-            raise HTTPException(
-                status_code=404,
-                detail="No route found between those stops"
-            )
+            raise HTTPException(status_code=404,detail="No route found between those stops")
 
         path = record["path"]
         nodes = list(path.nodes)
@@ -593,7 +543,7 @@ def get_route(
     lines_used = []
     stop_ids = set()
 
-    # --- 2) Build segments from Neo4j ---
+    # Process path segments in Neo4j
     for idx, rel in enumerate(rels):
         from_node = nodes[idx]
         to_node = nodes[idx + 1]
@@ -646,7 +596,7 @@ def get_route(
             }
         )
 
-    # --- 3) Oracle enrichment ---
+    # Import oracle data for lines and stops
     oracle_lines = {}
     oracle_stops = {}
 
@@ -719,7 +669,7 @@ def get_route(
             seg["to_stop"]["lat"] = oracle_stops[tsid]["lat"]
             seg["to_stop"]["lon"] = oracle_stops[tsid]["lon"]
 
-    # --- 4) Mongo enrichment (direct mongo_db import) ---
+    # Import mongo db data for lines
     lines_coll = mongo_db["lines"]
 
     mongo_docs = list(
@@ -769,13 +719,9 @@ def get_route(
         "lines_enriched": lines_enriched,
     }
 
-
+# Get stops
 @app.get("/api/stops")
-def list_stops(current_user=Depends(get_current_user)):
-    """
-    Simple list of all stops from Oracle, for the UI dropdowns.
-    """
-    
+def list_stops(_=Depends(get_current_user)):
     with get_engine().begin() as conn:
         result = conn.execute(
             text(
@@ -804,21 +750,16 @@ def list_stops(current_user=Depends(get_current_user)):
 
     return stops
 
+# Let user set favorite lines
 @app.post("/api/profile/favorites/lines")
-def set_line_favorite(
-    payload: LineFavoritePayload,
-    current_user=Depends(get_current_user),
-):
+def set_line_favorite(payload: LineFavoritePayload,current_user=Depends(get_current_user),):
     
     profiles = mongo_db.user_profiles
-
     update_doc = {}
 
-    # If this is a new profile, at least give it default prefs.
+    # Give default prefs on new profile
     update_doc["$setOnInsert"] = {
         "prefs": {"notifyDisruptions": True, "units": "metric"},
-        # do NOT set "favorites" here, or you conflict with favorites.lines
-        # do NOT set "recentTrips" here either, or you conflict if other code pushes to it
     }
 
     if payload.favorite:
@@ -834,11 +775,9 @@ def set_line_favorite(
 
     return {"ok": True}
 
+# favorite stops
 @app.post("/api/profile/favorites/stops")
-def set_stop_favorite(
-    payload: StopFavoritePayload,
-    current_user=Depends(get_current_user),
-):
+def set_stop_favorite(payload: StopFavoritePayload,current_user=Depends(get_current_user),):
     
     profiles = mongo_db.user_profiles
 
@@ -846,7 +785,6 @@ def set_stop_favorite(
 
     update_doc["$setOnInsert"] = {
         "prefs": {"notifyDisruptions": True, "units": "metric"},
-        # no "favorites" and no "recentTrips" here
     }
 
     if payload.favorite:
@@ -863,10 +801,7 @@ def set_stop_favorite(
     return {"ok": True}
 
 @app.post("/api/profile/prefs")
-def set_prefs(
-    payload: PrefsPayload,
-    current_user=Depends(get_current_user),
-):
+def set_prefs(payload: PrefsPayload,current_user=Depends(get_current_user),):
    
     profiles = mongo_db.user_profiles
 
@@ -888,20 +823,13 @@ def set_prefs(
     return {"ok": True}
 
 
-# ==========================
+# ######################
 # Live vehicles (Mongo)
-# ==========================
-from datetime import datetime, timezone, timedelta
-import random
-from typing import Dict, Any, List, Tuple, Optional
-from sqlalchemy import text
-import math
+# ######################
 
 vehicles_col = mongo_db["vehicles"]
 lines_col = mongo_db["lines"]
 stops_col = mongo_db["stops"]
-from sqlalchemy import text
-from datetime import datetime
 
 def _oracle_table_has_column(table_name: str, column_name: str) -> bool:
     sql = text("""
@@ -919,19 +847,8 @@ def _oracle_table_has_column(table_name: str, column_name: str) -> bool:
 
 
 def _active_assignments_for_line(line_id: str) -> dict:
-    """
-    Returns:
-      vehicle_id -> {"assignment_id": ..., "driver_id": ...}
-
-    Works with:
-    - schemas WITH end_ts
-    - schemas WITHOUT end_ts (uses latest start_ts <= now)
-    """
-
     has_end = _oracle_table_has_column("DRIVER_ASSIGNMENTS", "END_TS")
 
-    # Use Python 'now' to avoid timezone surprises.
-    # Keep it naive for Oracle binds unless you're sure your driver handles tz-aware cleanly.
     now = datetime.now()
 
     if has_end:
@@ -941,26 +858,6 @@ def _active_assignments_for_line(line_id: str) -> dict:
             WHERE line_id = :line_id
               AND start_ts <= :now
               AND (end_ts IS NULL OR end_ts > :now)
-        """)
-        params = {"line_id": line_id, "now": now}
-
-    else:
-        # Fallback rule:
-        # The active assignment is the one with the most recent start_ts <= now.
-        # This exactly matches your ASG_*_01 then ASG_*_02 pattern.
-        sql = text("""
-            SELECT assignment_id, vehicle_id, driver_id
-            FROM (
-                SELECT a.*,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY line_id
-                           ORDER BY start_ts DESC
-                       ) AS rn
-                FROM driver_assignments a
-                WHERE line_id = :line_id
-                  AND start_ts <= :now
-            )
-            WHERE rn = 1
         """)
         params = {"line_id": line_id, "now": now}
 
@@ -1018,24 +915,15 @@ def _load_stop_meta(stop_ids: List[str]) -> Tuple[Dict[str, Tuple[float, float]]
     return coords_map, meta_map
 
 
-from datetime import datetime, timedelta, timezone
-
 def _advance_segment(itinerary, idx, segment_start, now):
     if not itinerary or len(itinerary) < 2:
         return 0, now, 0.0, 0
 
-    # ✅ NEW: fallback if missing simulation timestamp
     if segment_start is None:
         segment_start = now
 
-    # ✅ Optional: normalize tz-awareness
-    if isinstance(segment_start, datetime):
-        if segment_start.tzinfo is None and now.tzinfo is not None:
-            segment_start = segment_start.replace(tzinfo=now.tzinfo)
-
-
-    # Normalize tz-awareness
-    if segment_start and isinstance(segment_start, datetime):
+    # Normalize tz-awareness if needed
+    if isinstance(segment_start, datetime) and isinstance(now, datetime):
         if segment_start.tzinfo is None and now.tzinfo is not None:
             segment_start = segment_start.replace(tzinfo=now.tzinfo)
         elif segment_start.tzinfo is not None and now.tzinfo is None:
@@ -1057,7 +945,7 @@ def _advance_segment(itinerary, idx, segment_start, now):
             idx = 0
 
 
-
+# normalize lon/lat data
 def _interpolate(a: Tuple[float, float], b: Tuple[float, float], t: float) -> Tuple[float, float]:
     lon = a[0] + (b[0] - a[0]) * t
     lat = a[1] + (b[1] - a[1]) * t
@@ -1065,14 +953,6 @@ def _interpolate(a: Tuple[float, float], b: Tuple[float, float], t: float) -> Tu
 
 
 def _simulate_vehicle_position(vehicle, itinerary, coords_map, meta_map, now, assignment=None):
-
-    """
-    Uses/updates:
-      vehicle.sim.idx
-      vehicle.sim.segment_start_ts
-      vehicle.lastKnown
-    Returns an enriched payload for the API.
-    """
     if len(itinerary) < 2:
         return {
             "vehicle_id": vehicle.get("_id"),
@@ -1083,7 +963,7 @@ def _simulate_vehicle_position(vehicle, itinerary, coords_map, meta_map, now, as
 
     sim = vehicle.get("sim") or {}
     idx = int(sim.get("idx") or 0)
-    segment_start_ts = sim.get("segment_start_ts") or now  # ✅ NEW DEFAULT
+    segment_start_ts = sim.get("segment_start_ts") or now  
 
     # Normalize tz-awareness if needed
     if isinstance(segment_start_ts, datetime):
@@ -1140,12 +1020,9 @@ def _simulate_vehicle_position(vehicle, itinerary, coords_map, meta_map, now, as
         } if loc_obj else None,
         "departed_stop": meta_map.get(from_stop_id, {"stop_id": from_stop_id}),
         "next_stop": meta_map.get(to_stop_id, {"stop_id": to_stop_id}),
-
-        # ✅ Canonical + compatibility keys
         "eta_next_s": remaining_s,
         "eta_to_next_stop_s": remaining_s,
         "eta_to_next_stop_min": int(math.ceil(remaining_s / 60)) if remaining_s is not None else None,
-
         "segment_progress": progress,
         "rel_type": "NEXT",
         "avg_travel_s": travel_s,
@@ -1164,12 +1041,8 @@ def _simulate_vehicle_position(vehicle, itinerary, coords_map, meta_map, now, as
 
 
 @app.get("/api/live/{line_id}")
-def live_line(line_id: str, current_user=Depends(get_current_user)):
-    """
-    Live vehicles for a line:
-    - Uses Oracle driver_assignments to decide which vehicle is active now.
-    - Simulates position only for active vehicles.
-    """
+def live_line(line_id: str, _=Depends(get_current_user)):
+    # Load line itinerary from Mongo
     itinerary = _load_itinerary(line_id)
     if not itinerary or len(itinerary) < 2:
         raise HTTPException(status_code=404, detail="Line not found in Mongo or itinerary too short")
@@ -1177,21 +1050,19 @@ def live_line(line_id: str, current_user=Depends(get_current_user)):
     stop_ids = [i["stop_id"] for i in itinerary]
     coords_map, meta_map = _load_stop_meta(stop_ids)
 
-    # 1) Oracle decides who is active NOW
+    # Oracle decides who is active NOW
     assignment_map = _active_assignments_for_line(line_id)
     active_vehicle_ids = list(assignment_map.keys())
 
-    # 2) Get only active vehicles from Mongo
+    # Get only active vehicles from Mongo
     mongo_query = {"line": line_id}
     if active_vehicle_ids:
         mongo_query["_id"] = {"$in": active_vehicle_ids}
 
     vehicles = list(vehicles_col.find(mongo_query))
 
-    # Fallback: if no assignment found (e.g., your seed not loaded yet),
-    # you can decide whether to show none or all:
+
     if not active_vehicle_ids:
-        # Strict mode:
         return {"line_id": line_id, "vehicles": [], "note": "No active driver assignments now"}
 
     now = datetime.now(timezone.utc)
@@ -1216,16 +1087,13 @@ def live_line(line_id: str, current_user=Depends(get_current_user)):
     }
 
 
-# -----------------------------
-# Lines and History html endpoint
-# -----------------------------
-
+# ################################
+# Other HTML endpoints
+# ################################
+ 
 @app.get("/lines", response_class=HTMLResponse)
 async def lines_page(request: Request):
-    """
-    Shows all lines from Oracle in a table (lines.html).
-    Requires the user to be logged in (session cookie).
-    """
+
     token = request.cookies.get("session_token")
     user = None
 
@@ -1237,7 +1105,7 @@ async def lines_page(request: Request):
     if not user:
         return RedirectResponse(url="/login", status_code=302)
 
-    # ---- SIMPLIFIED QUERY HERE ----
+    # Load all lines from Oracle
     with get_engine().begin() as conn:
         result = conn.execute(
             text(
@@ -1272,7 +1140,7 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
 
     user_id = current_user["user_id"]
 
-    # 1) ORACLE: base trip info
+    # Build trip history view
     with get_engine().begin() as conn:
         rows = conn.execute(
             text(
@@ -1319,7 +1187,7 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
             },
         )
 
-    # 2) MONGO: get lines_used per trip (multi-line journeys)
+    # Get lines used per trip from Mongo
     trip_ids = [t["trip_id"] for t in trips]
 
     lines_used_by_trip = {}
@@ -1330,7 +1198,7 @@ def history_page(request: Request, current_user=Depends(get_current_user)):
     for doc in mongo_trips:
         lines_used_by_trip[doc["_id"]] = doc.get("lines_used", []) or []
 
-    # 3) Final "lines" list per trip: Mongo first, fallback to Oracle line_id
+    # Gets from Mongo, fall back to Oracle line_id if needed
     for t in trips:
         lines = lines_used_by_trip.get(t["trip_id"], [])
         if not lines and t["line_id"]:
@@ -1449,8 +1317,6 @@ def profile_page(request: Request, current_user=Depends(get_current_user)):
 
 @app.get("/live", response_class=HTMLResponse)
 def live_page(request: Request, current_user=Depends(get_current_user)):
-    # If you already have an endpoint that returns lines list, you can pass it here.
-    # But to keep this UI decoupled, we’ll fetch lines via JS.
     return templates.TemplateResponse(
         "live.html",
         {
@@ -1460,9 +1326,9 @@ def live_page(request: Request, current_user=Depends(get_current_user)):
     )
 
 
-# ---------------------------
-# Existing DB / Redis tests
-# ---------------------------
+# ########################################################################################################################
+# Existing SQL and NoSQL tests, to see if connections work (in Mongo section also check if collections are present)
+# ########################################################################################################################
 
 @app.get("/db-test")
 def db_test():
@@ -1508,7 +1374,7 @@ def mongo_test():
         trips_count = trips_col.count_documents({})
         schedules_count = schedules_col.count_documents({})
 
-        # Samples (small projections)
+        # Samples 
         sample_line = lines_col.find_one({}, {"_id": 1, "code": 1, "name": 1, "mode": 1})
         sample_stop = stops_col.find_one({}, {"_id": 1, "code": 1, "name": 1})
         sample_vehicle = vehicles_col.find_one(
@@ -1516,7 +1382,7 @@ def mongo_test():
             {"_id": 1, "plate": 1, "model": 1, "capacity": 1, "line": 1, "lastKnown": 1},
         )
 
-        # Quick “quality” checks for vehicles
+        # checks for vehicles
         vehicles_missing_lastKnown = vehicles_col.count_documents({"lastKnown": {"$exists": False}})
         vehicles_missing_model = vehicles_col.count_documents({"model": {"$exists": False}})
         vehicles_missing_capacity = vehicles_col.count_documents({"capacity": {"$exists": False}})
@@ -1530,7 +1396,7 @@ def mongo_test():
             else vehicles_count
         )
 
-        # Optional: how many vehicles have a lastKnown timestamp at all
+        # how many vehicles have a lastKnown timestamp at all
         vehicles_with_lastKnown = vehicles_col.count_documents({"lastKnown.ts": {"$exists": True}})
 
         return {

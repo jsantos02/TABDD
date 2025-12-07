@@ -3,10 +3,8 @@
 import uuid
 from passlib.context import CryptContext
 from sqlalchemy import text
-
-from app.db.oracle import get_engine  # your lazy Oracle engine
-
-# Switched from bcrypt to pbkdf2_sha256
+from app.db.oracle import get_engine  
+# Cryptographic context for password hashing
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 

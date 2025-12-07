@@ -6,7 +6,7 @@ from sqlalchemy import text
 
 from app.db.oracle import get_engine
 
-
+# Create a new user session
 def create_user_session(
     session_id: str,
     user_id: str,
@@ -39,12 +39,8 @@ def create_user_session(
             },
         )
 
-
+# Update the timestamp to expire user session 
 def expire_user_session(session_id: str) -> int:
-    """
-    Mark session expired by setting expires_at = SYSTIMESTAMP.
-    Returns number of affected rows.
-    """
     sql = text("""
         UPDATE user_sessions
         SET expires_at = SYSTIMESTAMP
@@ -54,11 +50,8 @@ def expire_user_session(session_id: str) -> int:
         result = conn.execute(sql, {"session_id": session_id})
         return result.rowcount
 
-
+# Delete the user session from DB
 def delete_user_session(session_id: str) -> int:
-    """
-    Physically delete a session row.
-    """
     sql = text("""
         DELETE FROM user_sessions
         WHERE session_id = :session_id
@@ -67,11 +60,8 @@ def delete_user_session(session_id: str) -> int:
         result = conn.execute(sql, {"session_id": session_id})
         return result.rowcount
 
-
+# retrieve active user session by session_id
 def get_active_session(session_id: str) -> Optional[dict]:
-    """
-    Return session row if it exists AND is not expired yet.
-    """
     sql = text("""
         SELECT session_id, user_id, issued_at, expires_at
         FROM user_sessions
