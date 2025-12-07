@@ -1,7 +1,6 @@
 # project/app/services/live_service.py
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Tuple, List, Optional
-import math
+from typing import Tuple
 
 from app.repositories import mongo_vehicles, oracle_ops
 

@@ -4,7 +4,7 @@ from app.db.mongo import mongo_db
 def run_benchmark():
     col = mongo_db["vehicles"]
     line_query = "LINE_M_A"
-    iterations = 5000  
+    iterations = 2000  
 
     print(f"--- MONGODB BENCHMARK ({iterations} iterations) ---")
 

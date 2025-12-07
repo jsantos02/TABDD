@@ -7,10 +7,30 @@
 <p><strong>Name:</strong> {{ user.full_name }}</p>
 <p><strong>Email:</strong> {{ user.email }}</p>
 
+<h2>Preferences</h2>
+<form id="prefs-form" onsubmit="savePrefs(event)">
+  <label>
+    <input type="checkbox" id="notifyDisruptions" {% if prefs.notifyDisruptions %}checked{% endif %}>
+    Notify me about disruptions
+  </label>
+  <br>
+  <label>
+    Units:
+    <select id="units">
+      <option value="metric" {% if prefs.units == "metric" %}selected{% endif %}>Metric (km)</option>
+      <option value="imperial" {% if prefs.units == "imperial" %}selected{% endif %}>Imperial (mi)</option>
+    </select>
+  </label>
+  <br>
+  <button type="submit">Save preferences</button>
+</form>
+
+<p id="prefs-status" style="color: green; display:none;">Preferences saved!</p>
+
 <hr>
 
 <h2>Favorite lines</h2>
-<p>You can mark lines as favorites. This is stored in MongoDB, while line info comes from Oracle.</p>
+<p>You can mark lines as favorites. If you set notifications on you'll get notifications about your favorite lines in the front page.</p>
 
 <table>
   <thead>
@@ -26,7 +46,7 @@
     <tr>
       <td>{{ line.code }}</td>
       <td>{{ line.name }}</td>
-      <td>{{ line.mode }}</td>
+      <td>{{ line.line_mode }}</td>
       <td>
         {% if line.is_favorite %}
           <button onclick="setFavoriteLine('{{ line.line_id }}', false)">★ Remove</button>
@@ -42,7 +62,7 @@
 <hr>
 
 <h2>Favorite stops</h2>
-<p>Mark stops you use frequently (also stored in MongoDB, stop details from Oracle).</p>
+<p>Mark stops you use frequently as favorite.</p>
 
 <table>
   <thead>
@@ -71,25 +91,7 @@
 
 <hr>
 
-<h2>Preferences</h2>
-<form id="prefs-form" onsubmit="savePrefs(event)">
-  <label>
-    <input type="checkbox" id="notifyDisruptions" {% if prefs.notifyDisruptions %}checked{% endif %}>
-    Notify me about disruptions
-  </label>
-  <br>
-  <label>
-    Units:
-    <select id="units">
-      <option value="metric" {% if prefs.units == "metric" %}selected{% endif %}>Metric (km)</option>
-      <option value="imperial" {% if prefs.units == "imperial" %}selected{% endif %}>Imperial (mi)</option>
-    </select>
-  </label>
-  <br>
-  <button type="submit">Save preferences</button>
-</form>
 
-<p id="prefs-status" style="color: green; display:none;">Preferences saved!</p>
 
 <script>
 async function setFavoriteLine(lineId, favorite) {

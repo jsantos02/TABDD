@@ -7,14 +7,11 @@ from app.db.oracle import get_engine
 # Cryptographic context for password hashing
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
-
 def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
-
 
 def get_user_by_email(email: str):
     sql = text("""
@@ -26,7 +23,6 @@ def get_user_by_email(email: str):
         row = conn.execute(sql, {"email": email}).fetchone()
         return dict(row._mapping) if row else None
 
-
 def get_user_by_id(user_id: str):
     sql = text("""
         SELECT user_id, email, password_hash, full_name, role, is_active
@@ -36,7 +32,6 @@ def get_user_by_id(user_id: str):
     with get_engine().begin() as conn:
         row = conn.execute(sql, {"user_id": user_id}).fetchone()
         return dict(row._mapping) if row else None
-
 
 def create_user(email: str, password: str, full_name: str, role: str = "passenger"):
     user_id = str(uuid.uuid4())

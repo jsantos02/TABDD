@@ -50,8 +50,8 @@ def find_best_route(origin_id: str, dest_id: str, units: str = "metric"):
             "line_id": "WALK" if rel.type == "TRANSFER" else line_id,
             "from_stop": dict(from_n),
             "to_stop": dict(to_n),
-            "avg_travel_s": avg_travel,  # Restored field
-            "walk_s": walk_time,         # Restored field
+            "avg_travel_s": avg_travel,  
+            "walk_s": walk_time,         
             "cost_s": cost
         })
 

@@ -95,7 +95,7 @@ SESSION_PREFIX = "session:"
 def create_session(user_id: str, request: Request) -> str:
 
     token = str(uuid.uuid4())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=settings.SESSION_TTL_SECONDS)
 
     user_agent = request.headers.get("user-agent")
@@ -139,7 +139,7 @@ def get_user_id_from_token(token: str | None) -> str | None:
 
    
     expires_at = session["expires_at"]
-    # Expires the session in 1 hour. (in the future it would be nice to have it not expire if active)
+    
     now = datetime.now(datetime.timezone.utc)
     ttl_seconds = int((expires_at - now).total_seconds())
 
@@ -475,10 +475,22 @@ def set_stop_favorite(payload: StopFavoritePayload, current_user=Depends(get_cur
     mongo_profiles.update_favorite_stop(current_user["user_id"], payload.stop_id, payload.favorite)
     return {"ok": True}
 
+# set preferences
 @app.post("/api/profile/prefs")
 def set_prefs(payload: PrefsPayload,current_user=Depends(get_current_user),):
     mongo_profiles.update_preferences(current_user["user_id"], payload.notifyDisruptions, payload.units)
     return {"ok": True}
+
+# live feature
+@app.get("/api/live/{line_id}")
+def live_line(line_id: str, _=Depends(get_current_user)):
+    result = live_service.calculate_positions(line_id)
+    
+    if "error" in result:
+        # If the service returned an error dict, handle it
+        raise HTTPException(status_code=404, detail=result["error"])
+        
+    return result
 
 
 # ####################
@@ -511,18 +523,7 @@ def create_assignment(payload: DriverAssignmentCreate, _=Depends(get_current_adm
     oracle_ops.create_assignment(assignment_id, payload.driver_id, payload.vehicle_id, payload.line_id)
     return {"ok": True, "assignment_id": assignment_id}
 
-# ######################
-# Live vehicles (Mongo)
-# ######################
-@app.get("/api/live/{line_id}")
-def live_line(line_id: str, _=Depends(get_current_user)):
-    result = live_service.calculate_positions(line_id)
-    
-    if "error" in result:
-        # If the service returned an error dict, handle it
-        raise HTTPException(status_code=404, detail=result["error"])
-        
-    return result
+
 
 # #####################
 # Other HTML endpoints
