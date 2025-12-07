@@ -87,9 +87,9 @@ class DriverAssignmentCreate(BaseModel):
 class UserStatusUpdate(BaseModel):
     is_active: bool
 
-# ##############################
+# #################
 # Helper functions
-# ##############################
+# #################
 
 SESSION_PREFIX = "session:"
 def create_session(user_id: str, request: Request) -> str:
@@ -193,9 +193,9 @@ def set_secure_cookie(response: Response, key: str, value: str):
         secure=True, 
         samesite="lax"
     )
-# ##############################
+# ######################################
 # HTML pages for login and registration
-# ##############################
+# ######################################
 
 # Home page redirects to login if user not logged in. Also alerts when favorite lines have disruptions will be done here to fullfill requirements
 @app.get("/", response_class=HTMLResponse)
@@ -332,9 +332,9 @@ def me(current_user=Depends(get_current_user)):
         "is_active": current_user["is_active"],
     }
 
-# ##############################
+# ##############
 # API endpoints
-# ##############################
+# ##############
 
 # Show alerts API for current user
 @app.get("/api/alerts")
@@ -481,9 +481,9 @@ def set_prefs(payload: PrefsPayload,current_user=Depends(get_current_user),):
     return {"ok": True}
 
 
-# ##############################
+# ####################
 # Admin API Endpoints
-# ##############################
+# ####################
 
 @app.post("/api/admin/alerts")
 def create_alert(payload: AdminAlertCreate, _=Depends(get_current_admin)):
@@ -524,9 +524,9 @@ def live_line(line_id: str, _=Depends(get_current_user)):
         
     return result
 
-# ################################
+# #####################
 # Other HTML endpoints
-# ################################
+# #####################
  
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request, current_user=Depends(get_current_admin)):
